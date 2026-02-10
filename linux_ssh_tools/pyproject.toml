@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "linux_ssh_tools"
+version = "0.1.0"
+description = "Robust SSH tools for Linux device management from Windows"
+authors = [{name = "Mistral Vibe", email = "vibe@mistral.ai"}]
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: Microsoft :: Windows",
+]
+dependencies = [
+    "paramiko>=2.12.0",
+    "typeguard>=4.0.0",
+    "tqdm>=4.65.0",
+]
+
+[project.scripts]
+linux-ssh = "linux_ssh_tools.cli:main"
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+disallow_incomplete_defs = true
+strict_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+pretty = true
+show_column_numbers = true
+show_error_codes = true
