@@ -1,13 +1,14 @@
 """
-Linux SSH Tools - Robust SSH utilities for managing Linux devices from Windows
+Linux SSH Tools - Robust SSH & serial utilities for managing Linux devices
 
 This package provides a comprehensive set of tools for interacting with Linux devices
-via SSH from a Windows 10 PC. It includes:
+from Windows 10 or Ubuntu 24.04. It includes:
 
 - **Robust file transfer** with speed monitoring and verification
 - **Command execution** with detailed error reporting
 - **Interactive terminal** launch with auto-approval of SSH fingerprints
 - **Connection management** with automatic cleanup
+- **Serial communication** with flush-then-read pattern for hardware consoles
 
 All operations bypass SSH fingerprint verification for stateless hardware devices
 on internal networks, with full error reporting and validation.
@@ -45,3 +46,28 @@ COMMAND_TIMEOUT = 600
 # File transfer settings
 CHUNK_SIZE = 8192
 PROGRESS_UPDATE_INTERVAL = 0.1
+
+# Serial communication settings
+SERIAL_BAUD_RATE = 115200
+SERIAL_BYTESIZE = 8       # 8 data bits
+SERIAL_PARITY = "N"       # No parity
+SERIAL_STOPBITS = 1       # 1 stop bit
+SERIAL_READ_TIMEOUT = 0.1  # seconds — internal polling granularity, NOT the user-facing duration
+SERIAL_DEFAULT_DURATION_MS = 2000  # default read duration in milliseconds
+
+# Default serial device paths per machine.
+# On Windows these are COM ports (COM3, COM4, …).
+# On Linux these are /dev/ttyS*, /dev/ttyUSB*, or /dev/ttyACM* paths.
+# Override via environment variables:
+#   SERIAL_DEVICE_0_PORT / SERIAL_DEVICE_0_PORT2
+#   SERIAL_DEVICE_1_PORT / SERIAL_DEVICE_1_PORT2
+DEFAULT_SERIAL_DEVICES = [
+    {
+        "port": os.environ.get("SERIAL_DEVICE_0_PORT", "/dev/ttyUSB0"),
+        "port2": os.environ.get("SERIAL_DEVICE_0_PORT2", ""),
+    },
+    {
+        "port": os.environ.get("SERIAL_DEVICE_1_PORT", "/dev/ttyUSB1"),
+        "port2": os.environ.get("SERIAL_DEVICE_1_PORT2", ""),
+    },
+]

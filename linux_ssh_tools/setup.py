@@ -28,6 +28,7 @@ setup(
         "paramiko>=2.12.0",
         "typeguard>=4.0.0",
         "tqdm>=4.65.0",
+        "pyserial>=3.5",
     ],
     python_requires=">=3.8",
     classifiers=[

@@ -2,6 +2,7 @@
 paramiko>=2.12.0
 typeguard>=4.0.0
 tqdm>=4.65.0
+pyserial>=3.5
 
 # Test dependencies
 pytest>=7.0.0

@@ -6,10 +6,11 @@ import argparse
 import sys
 from typing import Optional
 
-from . import DEFAULT_LINUX_DEVICES
+from . import DEFAULT_LINUX_DEVICES, DEFAULT_SERIAL_DEVICES
 from .connection import SSHConnectionManager, SSHCommandExecutor
 from .file_transfer import SSHFileTransfer
 from .terminal import SSHTerminalLauncher
+from .serial_comm import SerialConnectionManager, SerialReader
 
 
 def create_connection_manager(device_index: int = 0, port: int = 22) -> SSHConnectionManager:
@@ -92,6 +93,49 @@ def command_download(args) -> int:
         return 1
 
 
+def command_serial_read(args) -> int:
+    """Read from serial port after flushing."""
+    serial_device = DEFAULT_SERIAL_DEVICES[args.device]
+    port_key = "port2" if args.line == 2 else "port"
+    port = args.serial_port or serial_device.get(port_key, "")
+
+    if not port:
+        print(
+            f"Error: No serial port configured for device {args.device}, "
+            f"line {args.line}. Set SERIAL_DEVICE_{args.device}_PORT"
+            f"{'2' if args.line == 2 else ''} or pass --serial-port.",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        with SerialConnectionManager(
+            port=port,
+            baud_rate=args.baud_rate,
+        ) as mgr:
+            reader = SerialReader(mgr)
+            data = reader.flush_and_read(duration_ms=args.duration)
+
+            print(data, end="")
+            return 0
+
+    except Exception as e:
+        print(f"Error: {str(e)}", file=sys.stderr)
+        return 1
+
+
+def command_serial_list(args) -> int:
+    """List available serial ports."""
+    ports = SerialConnectionManager.list_available_ports()
+    if not ports:
+        print("No serial ports found.")
+    else:
+        print("Available serial ports:")
+        for p in ports:
+            print(f"  {p}")
+    return 0
+
+
 def command_terminal(args) -> int:
     """Launch interactive terminal."""
     connection_manager = create_connection_manager(args.device, args.port)
@@ -156,6 +200,35 @@ def main() -> int:
     term_parser.add_argument("--command", help="Initial command to run")
     term_parser.add_argument("--title", help="Window title")
     term_parser.set_defaults(func=command_terminal)
+
+    # Serial read
+    serial_parser = subparsers.add_parser(
+        "serial-read", help="Flush serial buffer and read for a duration",
+    )
+    serial_parser.add_argument(
+        "--duration", type=int, default=2000,
+        help="Read duration in milliseconds (default: 2000)",
+    )
+    serial_parser.add_argument(
+        "--baud-rate", type=int, default=115200,
+        help="Baud rate (default: 115200)",
+    )
+    serial_parser.add_argument(
+        "--serial-port", type=str, default=None,
+        help="Serial port path (e.g. /dev/ttyUSB0 or COM3). "
+             "Overrides the device config.",
+    )
+    serial_parser.add_argument(
+        "--line", type=int, default=1, choices=[1, 2],
+        help="Serial line number per device (1 or 2, default: 1)",
+    )
+    serial_parser.set_defaults(func=command_serial_read)
+
+    # Serial list
+    serial_list_parser = subparsers.add_parser(
+        "serial-list", help="List available serial ports",
+    )
+    serial_list_parser.set_defaults(func=command_serial_list)
     
     args = parser.parse_args()
     return args.func(args)
