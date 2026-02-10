@@ -36,6 +36,14 @@ try:
 except ImportError:
     _MISSING.append("typeguard")
 
+# typeguard 4.x raises TypeCheckError (extends Exception, not TypeError).
+# typeguard 2.x raises plain TypeError.  Accept either in enforcement tests.
+try:
+    from typeguard import TypeCheckError
+    _TYPEGUARD_ERRORS = (TypeError, TypeCheckError)
+except ImportError:
+    _TYPEGUARD_ERRORS = (TypeError,)
+
 if _MISSING:
     print(
         "\n"
@@ -870,14 +878,14 @@ class TestTypeguardEnforcement:
     def test_serial_reader_rejects_wrong_type(self):
         # type: () -> None
         _report("TEST", "SerialReader('not_a_manager') should raise TypeError")
-        with pytest.raises(TypeError):
+        with pytest.raises(_TYPEGUARD_ERRORS):
             SerialReader("not_a_manager")  # type: ignore[arg-type]
         _report("PASS", "TypeError raised for wrong type")
 
     def test_serial_command_executor_rejects_wrong_type(self):
         # type: () -> None
         _report("TEST", "SerialCommandExecutor(123) should raise TypeError")
-        with pytest.raises(TypeError):
+        with pytest.raises(_TYPEGUARD_ERRORS):
             SerialCommandExecutor(123)  # type: ignore[arg-type]
         _report("PASS", "TypeError raised for wrong type")
 
