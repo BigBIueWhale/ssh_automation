@@ -9,7 +9,7 @@ on:
 # ─────────────────────────────────────────────────────────────────────
 #  Four jobs — all four must pass:
 #
-#  1. Ubuntu 24.04  + Python 3.7.0  + pinned old dependency versions
+#  1. Ubuntu 24.04  + Python 3.7    + pinned old dependency versions
 #  2. Windows       + Python 3.7    + pinned old dependency versions
 #  3. Ubuntu 24.04  + Python 3.12   + latest deps from requirements.txt
 #  4. Windows       + Python 3.12   + latest deps from requirements.txt
@@ -18,12 +18,12 @@ on:
 jobs:
 
   # ═══════════════════════════════════════════════════════════════════
-  #  1) Ubuntu 24.04 — Python 3.7.0 exact — pinned old versions
+  #  1) Ubuntu 24.04 — Python 3.7 — pinned old versions
   # ═══════════════════════════════════════════════════════════════════
   ubuntu-pinned:
-    name: "Ubuntu 24.04 | Python 3.7.0 | Pinned old deps"
+    name: "Ubuntu 24.04 | Python 3.7 | Pinned old deps"
     runs-on: ubuntu-24.04
-    container: python:3.7.0-slim
+    container: python:3.7-slim-buster
 
     steps:
       - uses: actions/checkout@v4
@@ -39,7 +39,7 @@ jobs:
           pip install \
             paramiko==3.5.1 \
             bcrypt==4.1.1 \
-            cryptography==45.0.2 \
+            cryptography==41.0.7 \
             pynacl==1.5.0 \
             cffi==1.15.1 \
             typeguard==2.13.3 \
@@ -81,7 +81,7 @@ jobs:
           python -m pip install `
             paramiko==3.5.1 `
             bcrypt==4.1.1 `
-            cryptography==45.0.2 `
+            cryptography==41.0.7 `
             pynacl==1.5.0 `
             cffi==1.15.1 `
             typeguard==2.13.3 `
