@@ -10,7 +10,7 @@ from . import DEFAULT_LINUX_DEVICES, DEFAULT_SERIAL_DEVICES
 from .connection import SSHConnectionManager, SSHCommandExecutor
 from .file_transfer import SSHFileTransfer
 from .terminal import SSHTerminalLauncher
-from .serial_comm import SerialConnectionManager, SerialReader
+from .serial_comm import SerialConnectionManager, SerialReader, SerialCommandExecutor
 
 
 def create_connection_manager(device_index: int = 0, port: int = 22) -> SSHConnectionManager:
@@ -124,6 +124,56 @@ def command_serial_read(args) -> int:
         return 1
 
 
+def command_serial_exec(args) -> int:
+    """Execute a command over the serial console."""
+    serial_device = DEFAULT_SERIAL_DEVICES[args.device]
+    port_key = "port2" if args.line == 2 else "port"
+    port = args.serial_port or serial_device.get(port_key, "")
+
+    if not port:
+        print(
+            f"Error: No serial port configured for device {args.device}, "
+            f"line {args.line}. Set SERIAL_DEVICE_{args.device}_PORT"
+            f"{'2' if args.line == 2 else ''} or pass --serial-port.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Build optional stop condition from --stop-on string
+    stop_condition = None
+    if args.stop_on:
+        stop_text = args.stop_on
+        stop_condition = lambda text: stop_text in text  # noqa: E731
+
+    try:
+        with SerialConnectionManager(
+            port=port,
+            baud_rate=args.baud_rate,
+        ) as mgr:
+            executor = SerialCommandExecutor(mgr)
+            result = executor.execute_command(
+                command=args.serial_command,
+                timeout_ms=args.timeout,
+                stop_condition=stop_condition,
+                on_data=lambda chunk: print(chunk, end="", flush=True) if args.stream else None,
+            )
+
+            if not args.stream:
+                print(result.output, end="")
+
+            if result.timed_out and args.stop_on:
+                print(
+                    f"\n[timed out after {result.elapsed_seconds:.1f}s "
+                    f"without matching --stop-on {args.stop_on!r}]",
+                    file=sys.stderr,
+                )
+            return 0
+
+    except Exception as e:
+        print(f"Error: {str(e)}", file=sys.stderr)
+        return 1
+
+
 def command_serial_list(args) -> int:
     """List available serial ports."""
     ports = SerialConnectionManager.list_available_ports()
@@ -223,6 +273,43 @@ def main() -> int:
         help="Serial line number per device (1 or 2, default: 1)",
     )
     serial_parser.set_defaults(func=command_serial_read)
+
+    # Serial exec
+    serial_exec_parser = subparsers.add_parser(
+        "serial-exec",
+        help="Execute a command over the serial console (ENTER, command, ENTER)",
+    )
+    serial_exec_parser.add_argument(
+        "serial_command", metavar="COMMAND",
+        help="Command to send over the serial line",
+    )
+    serial_exec_parser.add_argument(
+        "--timeout", type=int, default=30000,
+        help="Hard timeout in milliseconds (default: 30000)",
+    )
+    serial_exec_parser.add_argument(
+        "--stop-on", type=str, default=None,
+        help="Stop reading when this string appears in the output "
+             "(e.g. '# ' for a shell prompt)",
+    )
+    serial_exec_parser.add_argument(
+        "--stream", action="store_true", default=False,
+        help="Stream output to stdout as it arrives",
+    )
+    serial_exec_parser.add_argument(
+        "--baud-rate", type=int, default=115200,
+        help="Baud rate (default: 115200)",
+    )
+    serial_exec_parser.add_argument(
+        "--serial-port", type=str, default=None,
+        help="Serial port path (e.g. /dev/ttyUSB0 or COM3). "
+             "Overrides the device config.",
+    )
+    serial_exec_parser.add_argument(
+        "--line", type=int, default=1, choices=[1, 2],
+        help="Serial line number per device (1 or 2, default: 1)",
+    )
+    serial_exec_parser.set_defaults(func=command_serial_exec)
 
     # Serial list
     serial_list_parser = subparsers.add_parser(

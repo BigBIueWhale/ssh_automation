@@ -5,6 +5,10 @@ Linux devices (or any UART-accessible hardware).  Typical use-case: issue a
 command over SSH, then capture the serial response that arrives within a
 configurable time window.
 
+Also provides ``SerialCommandExecutor`` for running commands directly over the
+serial console (ENTER → command → ENTER) with blocking read, optional
+streaming callback, and content-based stop conditions.
+
 Cross-platform: works on both Windows 10 (COMx) and Ubuntu 24.04
 (/dev/ttyUSB*, /dev/ttyS*, /dev/ttyACM*).
 
@@ -13,10 +17,11 @@ Default line settings: 115200 8N1 (no flow control).
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import platform
 import time
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import serial
 import serial.tools.list_ports
@@ -29,6 +34,8 @@ from . import (
     SERIAL_STOPBITS,
     SERIAL_READ_TIMEOUT,
     SERIAL_DEFAULT_DURATION_MS,
+    SERIAL_COMMAND_TIMEOUT_MS,
+    SERIAL_PROMPT_SETTLE_MS,
 )
 from .exceptions import SerialCommunicationError, SerialTimeoutError
 
@@ -633,3 +640,438 @@ class SerialReader:
         )
 
         return decoded
+
+
+# ---------------------------------------------------------------------------
+# Serial command execution
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class SerialCommandResult:
+    """Immutable result of a serial command execution.
+
+    Attributes:
+        command: The command string that was sent.
+        output: All data received after the command was sent, decoded.
+        bytes_received: Total raw bytes received.
+        elapsed_seconds: Wall-clock time from command send to completion.
+        stopped_by_condition: ``True`` if a caller-supplied stop-condition
+            matched.  ``False`` if the read ended because the timeout expired.
+        timed_out: ``True`` if the timeout expired before a stop-condition
+            (or any stop-condition was provided).  Convenience inverse of
+            ``stopped_by_condition`` when a condition was given.
+    """
+    command: str
+    output: str
+    bytes_received: int
+    elapsed_seconds: float
+    stopped_by_condition: bool
+    timed_out: bool
+
+
+@typechecked
+class SerialCommandExecutor:
+    """Executes commands over a serial console with immaculate cleanup.
+
+    Designed for the workflow where the serial line is connected to a device
+    shell (Linux console, U-Boot, busybox, etc.) and you want to:
+
+    1. **Wake up** the line with a bare ENTER.
+    2. **Flush** every stale byte from both OS and device buffers.
+    3. **Send** the command followed by ENTER.
+    4. **Block** while accumulating the response.
+    5. **Stop** when a caller-defined condition matches the accumulated
+       output, *or* when a hard timeout expires — whichever comes first.
+    6. Optionally **stream** every chunk to a callback as it arrives.
+
+    The method works perfectly fine when no data comes back at all (returns
+    an empty-output result rather than raising).
+
+    Example::
+
+        with SerialConnectionManager("/dev/ttyUSB0") as mgr:
+            executor = SerialCommandExecutor(mgr)
+
+            # Run 'ls /' and wait for the shell prompt '# ' to reappear
+            result = executor.execute_command(
+                "ls /",
+                timeout_ms=5000,
+                stop_condition=lambda text: "# " in text.rsplit("\\n", 1)[-1],
+                on_data=lambda chunk: print(chunk, end="", flush=True),
+            )
+
+            print(f"Done (condition={result.stopped_by_condition})")
+            print(result.output)
+    """
+
+    def __init__(self, connection_manager: SerialConnectionManager) -> None:
+        """Initialize serial command executor.
+
+        Args:
+            connection_manager: An **open** ``SerialConnectionManager``.
+        """
+        self.connection_manager = connection_manager
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _assert_open(self, operation: str) -> serial.Serial:
+        """Validate the port is open and return the underlying Serial object.
+
+        Raises:
+            SerialCommunicationError: If the port is not open.
+        """
+        port_name = self.connection_manager.port
+        if not self.connection_manager.is_open():
+            msg = (
+                f"Cannot {operation} on serial port {port_name}: port is not "
+                f"open. Did you forget to call open() or use a context manager?"
+            )
+            logger.error("[SERIAL-CMD] %s", msg)
+            raise SerialCommunicationError(msg)
+        return self.connection_manager.get_serial()
+
+    def _drain_and_reset(self, ser: serial.Serial, label: str) -> int:
+        """Read and discard every byte in the receive buffer, then reset it.
+
+        This is a *thorough* flush: we first drain all application-visible
+        bytes (``in_waiting``), then call ``reset_input_buffer()`` to clear
+        the OS-level kernel buffer, then ``reset_output_buffer()`` to ensure
+        no outbound bytes are still in-flight from a previous write.
+
+        Args:
+            ser: The open serial object.
+            label: A logging label describing *why* we're flushing (e.g.
+                ``"pre-wake"`` or ``"post-wake"``).
+
+        Returns:
+            Number of application-level bytes that were discarded.
+        """
+        port_name = self.connection_manager.port
+        total_discarded = 0
+
+        try:
+            # Drain in a loop — bytes can keep arriving between reads
+            while True:
+                waiting = ser.in_waiting
+                if waiting <= 0:
+                    break
+                chunk = ser.read(waiting)
+                total_discarded += len(chunk)
+                logger.debug(
+                    "[SERIAL-CMD] [%s] Drained %d bytes from %s (total discarded: %d)",
+                    label, len(chunk), port_name, total_discarded,
+                )
+
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+
+            if total_discarded > 0:
+                logger.info(
+                    "[SERIAL-CMD] [%s] Discarded %d stale bytes and reset "
+                    "I/O buffers on %s",
+                    label, total_discarded, port_name,
+                )
+            else:
+                logger.debug(
+                    "[SERIAL-CMD] [%s] Buffers already clean on %s",
+                    label, port_name,
+                )
+
+        except serial.SerialException as exc:
+            msg = (
+                f"Error during {label} flush on {port_name}: {exc}. "
+                f"The port may have been disconnected."
+            )
+            logger.error("[SERIAL-CMD] [%s] ERROR — %s", label, msg)
+            raise SerialCommunicationError(msg) from exc
+        except OSError as exc:
+            msg = (
+                f"OS error during {label} flush on {port_name}: {exc}. "
+                f"The device may have been physically removed."
+            )
+            logger.error("[SERIAL-CMD] [%s] OS ERROR — %s", label, msg)
+            raise SerialCommunicationError(msg) from exc
+
+        return total_discarded
+
+    def _send_bytes(self, ser: serial.Serial, data: bytes, label: str) -> int:
+        """Write raw bytes and flush the OS transmit buffer.
+
+        Args:
+            ser: The open serial object.
+            data: Bytes to send.
+            label: Logging label.
+
+        Returns:
+            Number of bytes written.
+
+        Raises:
+            SerialCommunicationError: On write failure.
+        """
+        port_name = self.connection_manager.port
+        try:
+            n = ser.write(data)
+            ser.flush()
+            logger.debug(
+                "[SERIAL-CMD] [%s] Sent %d bytes to %s: %r",
+                label, n, port_name, data,
+            )
+            return n
+        except serial.SerialException as exc:
+            msg = (
+                f"Failed to write ({label}) to serial port {port_name}: {exc}. "
+                f"Attempted to send {len(data)} bytes: {data!r}. "
+                f"The device may have been disconnected."
+            )
+            logger.error("[SERIAL-CMD] [%s] WRITE ERROR — %s", label, msg)
+            raise SerialCommunicationError(msg) from exc
+        except OSError as exc:
+            msg = (
+                f"OS error writing ({label}) to serial port {port_name}: {exc}. "
+                f"Attempted to send {len(data)} bytes: {data!r}. "
+                f"The device may have been physically removed."
+            )
+            logger.error("[SERIAL-CMD] [%s] OS WRITE ERROR — %s", label, msg)
+            raise SerialCommunicationError(msg) from exc
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def execute_command(
+        self,
+        command: str,
+        timeout_ms: int = SERIAL_COMMAND_TIMEOUT_MS,
+        stop_condition: Optional[Callable[[str], bool]] = None,
+        on_data: Optional[Callable[[str], None]] = None,
+        encoding: str = "utf-8",
+        prompt_settle_ms: int = SERIAL_PROMPT_SETTLE_MS,
+    ) -> SerialCommandResult:
+        """Send a command over the serial console and capture the response.
+
+        **Sequence of operations (immaculate cleanup):**
+
+        1. **Drain + reset** — discard every byte in the receive buffer and
+           reset both the input and output OS-level buffers.
+        2. **Wake-up ENTER** — send a bare ``\\r\\n`` to ensure the remote
+           shell is at a prompt (handles sleeping consoles, partial
+           previous input, etc.).
+        3. **Settle pause** — wait ``prompt_settle_ms`` for any prompt /
+           echo to appear.
+        4. **Drain + reset again** — discard the prompt echo and any other
+           noise produced by the wake-up ENTER so the read starts perfectly
+           clean.
+        5. **Send command + ENTER** — write ``command`` followed by ``\\r\\n``.
+        6. **Blocking read loop** — accumulate bytes until:
+           - ``stop_condition(accumulated_text)`` returns ``True``, **or**
+           - ``timeout_ms`` milliseconds have elapsed.
+        7. Return a ``SerialCommandResult`` with all details.
+
+        Args:
+            command: The command string to execute (without trailing newline).
+            timeout_ms: Hard upper-bound in milliseconds.  The read will
+                always stop when this expires, regardless of the stop
+                condition.  Default: 30 000 ms (30 s).
+            stop_condition: An optional callable that receives the **full
+                accumulated decoded text so far** and returns ``True`` when
+                the command is considered complete.  Common patterns::
+
+                    # Stop when a shell prompt reappears
+                    stop_condition=lambda t: t.rstrip().endswith("# ")
+
+                    # Stop when a specific string appears anywhere
+                    stop_condition=lambda t: "DONE" in t
+
+                If ``None``, the read runs for the full ``timeout_ms``.
+            on_data: An optional streaming callback invoked with each **new
+                decoded chunk** as it arrives.  Useful for real-time
+                display::
+
+                    on_data=lambda chunk: print(chunk, end="", flush=True)
+
+                The callback must not raise.  If it does, the exception is
+                logged and swallowed so that the read loop is not disrupted.
+            encoding: Character encoding (default ``"utf-8"``).
+            prompt_settle_ms: How long to wait after the wake-up ENTER
+                before flushing the echo and sending the actual command.
+                Default: 200 ms.
+
+        Returns:
+            A ``SerialCommandResult`` with the command output, timing, and
+            whether the stop-condition fired or the timeout expired.
+
+        Raises:
+            SerialCommunicationError: If the port is not open, or a fatal
+                I/O error occurs during the write or read phase.
+        """
+        port_name = self.connection_manager.port
+        ser = self._assert_open("execute_command")
+
+        if timeout_ms <= 0:
+            raise SerialCommunicationError(
+                f"Invalid timeout {timeout_ms} ms for execute_command on "
+                f"{port_name}. Timeout must be a positive integer "
+                f"(e.g. 5000 for 5 seconds)."
+            )
+
+        logger.info(
+            "[SERIAL-CMD] Executing on %s: %r (timeout=%d ms, "
+            "stop_condition=%s, streaming=%s)",
+            port_name, command, timeout_ms,
+            "yes" if stop_condition is not None else "no",
+            "yes" if on_data is not None else "no",
+        )
+
+        # ---- Phase 1: Pre-command cleanup ----
+        logger.info("[SERIAL-CMD] Phase 1/4: Draining stale data on %s ...", port_name)
+        self._drain_and_reset(ser, "pre-wake")
+
+        # ---- Phase 2: Wake-up ENTER + settle + second flush ----
+        logger.info(
+            "[SERIAL-CMD] Phase 2/4: Sending wake-up ENTER on %s, "
+            "settling %d ms ...",
+            port_name, prompt_settle_ms,
+        )
+        self._send_bytes(ser, b"\r\n", "wake-up-enter")
+
+        if prompt_settle_ms > 0:
+            time.sleep(prompt_settle_ms / 1000.0)
+
+        self._drain_and_reset(ser, "post-wake")
+
+        # ---- Phase 3: Send command + ENTER ----
+        logger.info(
+            "[SERIAL-CMD] Phase 3/4: Sending command on %s: %r",
+            port_name, command,
+        )
+        cmd_bytes = (command + "\r\n").encode(encoding)
+        self._send_bytes(ser, cmd_bytes, "command")
+
+        # ---- Phase 4: Blocking read loop ----
+        logger.info(
+            "[SERIAL-CMD] Phase 4/4: Reading response on %s (up to %d ms) ...",
+            port_name, timeout_ms,
+        )
+
+        buffer = bytearray()
+        decoded_so_far = ""
+        stopped_by_condition = False
+        start_time = time.monotonic()
+        deadline = start_time + (timeout_ms / 1000.0)
+        poll_interval = self.connection_manager.read_timeout
+        read_cycles = 0
+
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+
+                waiting = ser.in_waiting
+                if waiting > 0:
+                    chunk_bytes = ser.read(waiting)
+                    buffer.extend(chunk_bytes)
+                    read_cycles += 1
+
+                    # Decode the full buffer each time (handles multi-byte
+                    # chars that may arrive split across reads).
+                    decoded_so_far = buffer.decode(encoding, errors="replace")
+
+                    logger.debug(
+                        "[SERIAL-CMD] +%d bytes from %s (total %d)",
+                        len(chunk_bytes), port_name, len(buffer),
+                    )
+
+                    # Stream callback
+                    if on_data is not None:
+                        try:
+                            chunk_str = chunk_bytes.decode(encoding, errors="replace")
+                            on_data(chunk_str)
+                        except Exception as cb_exc:
+                            logger.warning(
+                                "[SERIAL-CMD] on_data callback raised %s: %s "
+                                "(callback errors are swallowed to protect "
+                                "the read loop)",
+                                type(cb_exc).__name__, cb_exc,
+                            )
+
+                    # Stop-condition check
+                    if stop_condition is not None:
+                        try:
+                            if stop_condition(decoded_so_far):
+                                stopped_by_condition = True
+                                logger.info(
+                                    "[SERIAL-CMD] Stop condition matched on "
+                                    "%s after %d bytes (%.3fs)",
+                                    port_name, len(buffer),
+                                    time.monotonic() - start_time,
+                                )
+                                break
+                        except Exception as sc_exc:
+                            logger.warning(
+                                "[SERIAL-CMD] stop_condition raised %s: %s "
+                                "(treated as 'not matched', read continues)",
+                                type(sc_exc).__name__, sc_exc,
+                            )
+                else:
+                    sleep_time = min(poll_interval, remaining)
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+                    read_cycles += 1
+
+        except serial.SerialException as exc:
+            elapsed = time.monotonic() - start_time
+            msg = (
+                f"Serial read error on {port_name} during execute_command "
+                f"after {elapsed:.3f}s ({len(buffer)} bytes received so far, "
+                f"command={command!r}): {exc}. "
+                f"The device may have been disconnected during the read."
+            )
+            logger.error("[SERIAL-CMD] READ ERROR — %s", msg)
+            raise SerialCommunicationError(msg) from exc
+        except OSError as exc:
+            elapsed = time.monotonic() - start_time
+            msg = (
+                f"OS error reading from {port_name} during execute_command "
+                f"after {elapsed:.3f}s ({len(buffer)} bytes received so far, "
+                f"command={command!r}): {exc}. "
+                f"The device may have been physically removed."
+            )
+            logger.error("[SERIAL-CMD] OS READ ERROR — %s", msg)
+            raise SerialCommunicationError(msg) from exc
+
+        elapsed = time.monotonic() - start_time
+        bytes_received = len(buffer)
+        timed_out = not stopped_by_condition
+
+        # Final decode (in case no data arrived at all — decoded_so_far is "")
+        if bytes_received > 0 and not decoded_so_far:
+            decoded_so_far = buffer.decode(encoding, errors="replace")
+
+        if timed_out and stop_condition is not None:
+            logger.warning(
+                "[SERIAL-CMD] Timeout (%d ms) expired on %s before stop "
+                "condition matched. Received %d bytes in %.3fs. "
+                "Command: %r. Output tail: %s",
+                timeout_ms, port_name, bytes_received, elapsed, command,
+                decoded_so_far[-200:] if decoded_so_far else "(empty)",
+            )
+        else:
+            logger.info(
+                "[SERIAL-CMD] Completed on %s — %d bytes in %.3fs "
+                "(%d poll cycles, stopped_by_condition=%s). Command: %r",
+                port_name, bytes_received, elapsed, read_cycles,
+                stopped_by_condition, command,
+            )
+
+        return SerialCommandResult(
+            command=command,
+            output=decoded_so_far,
+            bytes_received=bytes_received,
+            elapsed_seconds=elapsed,
+            stopped_by_condition=stopped_by_condition,
+            timed_out=timed_out,
+        )

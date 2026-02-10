@@ -54,6 +54,8 @@ SERIAL_PARITY = "N"       # No parity
 SERIAL_STOPBITS = 1       # 1 stop bit
 SERIAL_READ_TIMEOUT = 0.1  # seconds — internal polling granularity, NOT the user-facing duration
 SERIAL_DEFAULT_DURATION_MS = 2000  # default read duration in milliseconds
+SERIAL_COMMAND_TIMEOUT_MS = 30000  # default serial command execution timeout
+SERIAL_PROMPT_SETTLE_MS = 200     # pause after wake-up ENTER before sending command
 
 # Default serial device paths per machine.
 # On Windows these are COM ports (COM3, COM4, …).

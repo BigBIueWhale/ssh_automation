@@ -6,6 +6,8 @@ Please write a robust Python script for Windows that I will run on a Windows 10 
 
 Add windows 10 / Ubuntu 24.04 functionality of serial communication. Imagine that these linux boxes also each have 1 or 2 serial lines, so add a "library" in the same style and engineering robustness that allows me to get a string from the serial communication (and obviously to flush beforehand) for a duration of x milliseconds. This way I can, for example- run a command via SSH and read a "response" that comes over the serial communication line. Should use by default 115200 and standard settings. Good error handling and very verbose error messages.
 
+Add ability to run command via serial communication- enter then write command then ENTER. And importantly it should be possible to block while waiting for that operation to complete, but do offer ability to stream any bytes received on that serial line during the command execution (if any) and don't base the stopping on timeout only. Should work fine also if no data is returned on serial line, and ability to set a condition for stopping based on contents of returned data. The cleanup mechanism in this operation and the flushing (write and read) before this operation should be immeculate.
+
 ## Strategic Advantages
 
 This implementation delivers **operational robustness** through:
