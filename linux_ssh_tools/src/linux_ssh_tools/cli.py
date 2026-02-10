@@ -8,6 +8,7 @@ from typing import Optional
 
 from . import DEFAULT_LINUX_DEVICES, DEFAULT_SERIAL_DEVICES
 from .connection import SSHConnectionManager, SSHCommandExecutor
+from .exceptions import SSHCommandError, SerialTimeoutError
 from .file_transfer import SSHFileTransfer
 from .terminal import SSHTerminalLauncher
 from .serial_comm import SerialConnectionManager, SerialReader, SerialCommandExecutor
@@ -17,7 +18,7 @@ def create_connection_manager(device_index: int = 0, port: int = 22) -> SSHConne
     """Create connection manager for specified device."""
     if device_index < 0 or device_index >= len(DEFAULT_LINUX_DEVICES):
         raise ValueError(f"Invalid device index. Must be 0-{len(DEFAULT_LINUX_DEVICES)-1}")
-    
+
     device = DEFAULT_LINUX_DEVICES[device_index]
     return SSHConnectionManager(
         hostname=device["hostname"],
@@ -30,20 +31,31 @@ def create_connection_manager(device_index: int = 0, port: int = 22) -> SSHConne
 def command_execute(args) -> int:
     """Execute command on remote device."""
     connection_manager = create_connection_manager(args.device, args.port)
-    
+    device = DEFAULT_LINUX_DEVICES[args.device]
+    ctx = f"CLI exec on {device['hostname']}:{args.port}"
+
     try:
         with connection_manager:
             executor = SSHCommandExecutor(connection_manager)
-            return_code, stdout, stderr = executor.execute_command(args.command)
-            
+            return_code, stdout, stderr = executor.execute_command(
+                args.command, context=ctx,
+            )
+
             print(f"Return code: {return_code}")
             if stdout:
                 print(f"STDOUT:\n{stdout}")
             if stderr:
                 print(f"STDERR:\n{stderr}", file=sys.stderr)
-            
+
             return 0 if return_code == 0 else 1
-            
+
+    except SSHCommandError as e:
+        print(f"Command failed (exit {e.return_code}): {e}", file=sys.stderr)
+        if e.stdout:
+            print(f"STDOUT:\n{e.stdout}")
+        if e.stderr:
+            print(f"STDERR:\n{e.stderr}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Error: {str(e)}", file=sys.stderr)
         return 1
@@ -52,20 +64,22 @@ def command_execute(args) -> int:
 def command_upload(args) -> int:
     """Upload file to remote device."""
     connection_manager = create_connection_manager(args.device, args.port)
-    
+    device = DEFAULT_LINUX_DEVICES[args.device]
+    ctx = f"CLI upload to {device['hostname']}:{args.port}"
+
     try:
         with connection_manager:
             file_transfer = SSHFileTransfer(connection_manager)
             bytes_transferred, speed = file_transfer.upload_file(
-                args.local_path, args.remote_path
+                args.local_path, args.remote_path, context=ctx,
             )
-            
+
             print(
                 f"Uploaded {bytes_transferred} bytes at "
                 f"{file_transfer._format_speed(speed)}"
             )
             return 0
-            
+
     except Exception as e:
         print(f"Error: {str(e)}", file=sys.stderr)
         return 1
@@ -74,20 +88,22 @@ def command_upload(args) -> int:
 def command_download(args) -> int:
     """Download file from remote device."""
     connection_manager = create_connection_manager(args.device, args.port)
-    
+    device = DEFAULT_LINUX_DEVICES[args.device]
+    ctx = f"CLI download from {device['hostname']}:{args.port}"
+
     try:
         with connection_manager:
             file_transfer = SSHFileTransfer(connection_manager)
             bytes_transferred, speed = file_transfer.download_file(
-                args.remote_path, args.local_path
+                args.remote_path, args.local_path, context=ctx,
             )
-            
+
             print(
                 f"Downloaded {bytes_transferred} bytes at "
                 f"{file_transfer._format_speed(speed)}"
             )
             return 0
-            
+
     except Exception as e:
         print(f"Error: {str(e)}", file=sys.stderr)
         return 1
@@ -108,13 +124,15 @@ def command_serial_read(args) -> int:
         )
         return 1
 
+    ctx = f"CLI serial-read on {port}"
+
     try:
         with SerialConnectionManager(
             port=port,
             baud_rate=args.baud_rate,
         ) as mgr:
             reader = SerialReader(mgr)
-            data = reader.flush_and_read(duration_ms=args.duration)
+            data = reader.flush_and_read(context=ctx, duration_ms=args.duration)
 
             print(data, end="")
             return 0
@@ -145,6 +163,8 @@ def command_serial_exec(args) -> int:
         stop_text = args.stop_on
         stop_condition = lambda text: stop_text in text  # noqa: E731
 
+    ctx = f"CLI serial-exec on {port}"
+
     try:
         with SerialConnectionManager(
             port=port,
@@ -153,6 +173,7 @@ def command_serial_exec(args) -> int:
             executor = SerialCommandExecutor(mgr)
             result = executor.execute_command(
                 command=args.serial_command,
+                context=ctx,
                 timeout_ms=args.timeout,
                 stop_condition=stop_condition,
                 on_data=lambda chunk: print(chunk, end="", flush=True) if args.stream else None,
@@ -161,14 +182,20 @@ def command_serial_exec(args) -> int:
             if not args.stream:
                 print(result.output, end="")
 
-            if result.timed_out and args.stop_on:
-                print(
-                    f"\n[timed out after {result.elapsed_seconds:.1f}s "
-                    f"without matching --stop-on {args.stop_on!r}]",
-                    file=sys.stderr,
-                )
             return 0
 
+    except SerialTimeoutError as e:
+        if e.result is not None:
+            if not args.stream:
+                print(e.result.output, end="")
+            print(
+                f"\n[timed out after {e.result.elapsed_seconds:.1f}s "
+                f"without matching --stop-on {args.stop_on!r}]",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Error: {str(e)}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Error: {str(e)}", file=sys.stderr)
         return 1
@@ -189,15 +216,18 @@ def command_serial_list(args) -> int:
 def command_terminal(args) -> int:
     """Launch interactive terminal."""
     connection_manager = create_connection_manager(args.device, args.port)
-    
+    device = DEFAULT_LINUX_DEVICES[args.device]
+    ctx = f"CLI terminal to {device['hostname']}:{args.port}"
+
     try:
         launcher = SSHTerminalLauncher(connection_manager)
         process = launcher.launch_terminal(
+            context=ctx,
             initial_command=args.command,
             window_title=args.title,
         )
         return 0
-        
+
     except Exception as e:
         print(f"Error: {str(e)}", file=sys.stderr)
         return 1
@@ -208,7 +238,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Linux SSH Tools - Manage Linux devices from Windows"
     )
-    
+
     # Device selection
     parser.add_argument(
         "--device",
@@ -216,7 +246,7 @@ def main() -> int:
         default=0,
         help="Device index (0 or 1)",
     )
-    
+
     # SSH port
     parser.add_argument(
         "--port",
@@ -224,27 +254,27 @@ def main() -> int:
         default=22,
         help="SSH port (default: 22)",
     )
-    
+
     # Subcommands
     subparsers = parser.add_subparsers(dest="command", required=True)
-    
+
     # Execute command
     exec_parser = subparsers.add_parser("exec", help="Execute command")
     exec_parser.add_argument("command", help="Command to execute")
     exec_parser.set_defaults(func=command_execute)
-    
+
     # Upload file
     upload_parser = subparsers.add_parser("upload", help="Upload file")
     upload_parser.add_argument("local_path", help="Local file path")
     upload_parser.add_argument("remote_path", help="Remote destination path")
     upload_parser.set_defaults(func=command_upload)
-    
+
     # Download file
     download_parser = subparsers.add_parser("download", help="Download file")
     download_parser.add_argument("remote_path", help="Remote file path")
     download_parser.add_argument("local_path", help="Local destination path")
     download_parser.set_defaults(func=command_download)
-    
+
     # Launch terminal
     term_parser = subparsers.add_parser("terminal", help="Launch terminal")
     term_parser.add_argument("--command", help="Initial command to run")
@@ -316,7 +346,7 @@ def main() -> int:
         "serial-list", help="List available serial ports",
     )
     serial_list_parser.set_defaults(func=command_serial_list)
-    
+
     args = parser.parse_args()
     return args.func(args)
 

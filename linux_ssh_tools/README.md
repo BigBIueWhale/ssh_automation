@@ -2,7 +2,7 @@
 
 ## Overview
 
-Please write a robust Python script for Windows that I will run on a Windows 10 PC that is connected via ethernet to two Linux boxes with ssh server enabled where username is hard-coded "root" and password hard-coded "root. This script will use paramiko and whatever other capabilities to provide an ability to robustly copy files into a linux machine. On this Windows machine also "ssh" is available, but the fingerprints and stuff need to be cleared before using. In general, the python script should not trust the environment. Anything unexpected should become a detailed error, not fallback. The idea is that within this script there needs to be also capability to run commands on the linux machine and get response output. Kind of like a dedicated connection run running an individual command on the remote machine and getting its output programmatically. Obviously any error should include the full command and ssh response. You **must** ignore the whole certificate fingerprint security mechanism- we're talking about stateless hardware devices on an internal network. The idea is that in addition to being able to robustly and verifiably copying-in files (while printing transfer speed), and in addition to running commands programmaticaly in dedicated SSH connection (with robust cleanup, and response), the script should also have a tool to launch a terminal for the Windows PC user to see! A window that's launched where the user can actually interact with the SSH session, but within this window you should somehow be able to run a command. Kind of like launching a cmd window with ssh auto approve (clearing the certificates in the current user folder first), and auto run a command within the opened ssh window but in a way that the user will actually monitor and interact with and good window title (appropriate). Please create python structure that provides all these facilities in high code quality, opinionated manner, checking and validating everything that can be checked, and set up in a way with a nice interface that the final actual script logic will just be a few lines, for whatever I'll ask you to do in terms off automation regarding these two linux boxes. The python should be statically typed, and created in a directory structure that allows the functionality to be modular and import-based. Go!
+Please write a robust Python script for Windows that I will run on a Windows 10 PC that is connected via ethernet to two Linux boxes with ssh server enabled where username is hard-coded "user" and password hard-coded "password". This script will use paramiko and whatever other capabilities to provide an ability to robustly copy files into a linux machine. On this Windows machine also "ssh" is available, but the fingerprints and stuff need to be cleared before using. In general, the python script should not trust the environment. Anything unexpected should become a detailed error, not fallback. The idea is that within this script there needs to be also capability to run commands on the linux machine and get response output. Kind of like a dedicated connection run running an individual command on the remote machine and getting its output programmatically. Obviously any error should include the full command and ssh response. You **must** ignore the whole certificate fingerprint security mechanism- we're talking about stateless hardware devices on an internal network. The idea is that in addition to being able to robustly and verifiably copying-in files (while printing transfer speed), and in addition to running commands programmaticaly in dedicated SSH connection (with robust cleanup, and response), the script should also have a tool to launch a terminal for the Windows PC user to see! A window that's launched where the user can actually interact with the SSH session, but within this window you should somehow be able to run a command. Kind of like launching a cmd window with ssh auto approve (clearing the certificates in the current user folder first), and auto run a command within the opened ssh window but in a way that the user will actually monitor and interact with and good window title (appropriate). Please create python structure that provides all these facilities in high code quality, opinionated manner, checking and validating everything that can be checked, and set up in a way with a nice interface that the final actual script logic will just be a few lines, for whatever I'll ask you to do in terms off automation regarding these two linux boxes. The python should be statically typed, and created in a directory structure that allows the functionality to be modular and import-based. Go!
 
 Add windows 10 / Ubuntu 24.04 functionality of serial communication. Imagine that these linux boxes also each have 1 or 2 serial lines, so add a "library" in the same style and engineering robustness that allows me to get a string from the serial communication (and obviously to flush beforehand) for a duration of x milliseconds. This way I can, for example- run a command via SSH and read a "response" that comes over the serial communication line. Should use by default 115200 and standard settings. Good error handling and very verbose error messages.
 
@@ -49,7 +49,7 @@ This implementation delivers **operational robustness** through:
 ## Implementation Benefits
 
 ### Operational Efficiency
-- **Hardcoded credentials** (root/root) eliminate credential management overhead
+- **Hardcoded credentials** (user/password) eliminate credential management overhead
 - **Automatic fingerprint handling** removes manual approval steps
 - **Comprehensive validation** catches errors early in the workflow
 - **Modular architecture** allows targeted upgrades and maintenance
@@ -97,8 +97,8 @@ from linux_ssh_tools import (
 # Establish connection with automatic fingerprint handling
 connection = SSHConnectionManager(
     hostname="192.168.1.100",
-    username="root",
-    password="root"
+    username="user",
+    password="password"
 )
 
 # Execute commands with full output capture
@@ -130,8 +130,8 @@ The package includes **pre-configured device profiles** for rapid deployment:
 
 ```python
 DEFAULT_LINUX_DEVICES = [
-    {"hostname": "192.168.1.100", "username": "root", "password": "root"},
-    {"hostname": "192.168.1.101", "username": "root", "password": "root"},
+    {"hostname": "192.168.1.100", "username": "user", "password": "password"},
+    {"hostname": "192.168.1.101", "username": "user", "password": "password"},
 ]
 ```
 

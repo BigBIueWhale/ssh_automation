@@ -6,7 +6,7 @@ import platform
 import shutil
 import subprocess
 import time
-from typing import Optional, List
+from typing import Optional, List, Union
 
 from typeguard import typechecked
 
@@ -29,20 +29,29 @@ class SSHTerminalLauncher:
         self.connection_manager = connection_manager
 
     def _build_ssh_args(self, initial_command: Optional[str] = None) -> List[str]:
-        """Build the base SSH command argument list."""
+        """Build the base SSH command argument list.
+
+        When *initial_command* is given the remote session runs that command
+        and then ``exec``-s the user's login shell so the terminal stays
+        interactive.
+        """
         hostname = self.connection_manager.hostname
         username = self.connection_manager.username
+        null_file = "NUL" if _IS_WINDOWS else "/dev/null"
 
         args = [
             "ssh",
             f"{username}@{hostname}",
             "-p", str(self.connection_manager.port),
             "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", f"UserKnownHostsFile={null_file}",
         ]
 
         if initial_command:
-            args.extend(["-t", initial_command])
+            # -t forces PTY allocation (required for interactive use).
+            # After the requested command finishes, exec the user's login
+            # shell so the session stays open for interactive control.
+            args.extend(["-t", f"{initial_command} ; exec ${{SHELL:-/bin/bash}}"])
 
         return args
 
@@ -66,17 +75,27 @@ class SSHTerminalLauncher:
         self,
         initial_command: Optional[str] = None,
         window_title: Optional[str] = None,
-    ) -> List[str]:
-        """Get command to launch CMD terminal with SSH."""
+    ) -> str:
+        """Get command to launch CMD terminal with SSH.
+
+        Returns a *string* (not a list) because ``cmd /k`` interprets
+        everything after ``/k`` as a single command line.  Returning a list
+        would cause ``subprocess.list2cmdline`` to add outer quotes around
+        the compound command, which prevents ``&`` from acting as a command
+        separator inside cmd.exe.
+        """
         hostname = self.connection_manager.hostname
         ssh_args = self._build_ssh_args(initial_command)
 
         title = window_title or f"SSH: {hostname}"
-        # cmd /k executes a compound command: set the title, then run ssh
-        return [
-            "cmd", "/k",
-            "title " + title + " & " + " ".join(ssh_args),
-        ]
+        # Escape cmd.exe metacharacters in the title so they are literal.
+        safe_title = title
+        for ch in "&|<>^()":
+            safe_title = safe_title.replace(ch, f"^{ch}")
+
+        # list2cmdline produces correct Windows quoting for each ssh arg.
+        ssh_cmd = subprocess.list2cmdline(ssh_args)
+        return f"cmd /k title {safe_title}& {ssh_cmd}"
 
     def _get_linux_terminal_command(
         self,
@@ -103,6 +122,7 @@ class SSHTerminalLauncher:
 
     def launch_terminal(
         self,
+        context: str,
         initial_command: Optional[str] = None,
         window_title: Optional[str] = None,
         use_windows_terminal: bool = True,
@@ -110,6 +130,7 @@ class SSHTerminalLauncher:
         """Launch interactive SSH terminal.
 
         Args:
+            context: Description of the purpose, embedded into error messages.
             initial_command: Command to run immediately in the terminal
             window_title: Custom window title
             use_windows_terminal: Use Windows Terminal if available (Windows only)
@@ -138,11 +159,12 @@ class SSHTerminalLauncher:
 
         except Exception as e:
             raise TerminalLaunchError(
-                f"Failed to launch terminal for {self.connection_manager.hostname}: {str(e)}"
+                f"[{context}] Failed to launch terminal for {self.connection_manager.hostname}: {str(e)}"
             ) from e
 
     def launch_with_auto_reconnect(
         self,
+        context: str,
         initial_command: Optional[str] = None,
         window_title: Optional[str] = None,
         max_attempts: int = 3,
@@ -151,6 +173,7 @@ class SSHTerminalLauncher:
         """Launch terminal with automatic reconnect attempts.
 
         Args:
+            context: Description of the purpose, embedded into error messages.
             initial_command: Command to run immediately in the terminal
             window_title: Custom window title
             max_attempts: Maximum number of launch attempts
@@ -163,7 +186,7 @@ class SSHTerminalLauncher:
 
         for attempt in range(max_attempts):
             try:
-                return self.launch_terminal(initial_command, window_title)
+                return self.launch_terminal(context, initial_command, window_title)
             except Exception as e:
                 last_error = e
                 if attempt < max_attempts - 1:
@@ -173,5 +196,5 @@ class SSHTerminalLauncher:
             raise last_error
 
         raise TerminalLaunchError(
-            f"Failed to launch terminal after {max_attempts} attempts"
+            f"[{context}] Failed to launch terminal after {max_attempts} attempts"
         )

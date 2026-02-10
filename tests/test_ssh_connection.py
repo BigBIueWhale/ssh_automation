@@ -55,7 +55,9 @@ if _MISSING:
     )
 
 from linux_ssh_tools.connection import SSHConnectionManager, SSHCommandExecutor
-from linux_ssh_tools.exceptions import SSHConnectionError, SSHTimeoutError
+from linux_ssh_tools.exceptions import (
+    SSHConnectionError, SSHTimeoutError, SSHCommandError, LinuxSSHToolsError,
+)
 
 # ---------------------------------------------------------------------------
 # Report environment
@@ -463,7 +465,7 @@ class TestSuccessfulConnection:
             port=srv1.port,
         )
         try:
-            mgr.connect()
+            mgr.connect(context="test connect server 1")
             connected = mgr.is_connected()
             _report("ASSERT", f"is_connected() == True → {connected}")
             assert connected
@@ -481,7 +483,7 @@ class TestSuccessfulConnection:
             port=srv2.port,
         )
         try:
-            mgr.connect()
+            mgr.connect(context="test connect server 2")
             connected = mgr.is_connected()
             _report("ASSERT", f"is_connected() == True → {connected}")
             assert connected
@@ -538,7 +540,9 @@ class TestCommandExecution:
             port=srv1.port,
         ) as mgr:
             executor = SSHCommandExecutor(mgr)
-            rc, stdout, stderr = executor.execute_command("echo 'Hello from server 1'")
+            rc, stdout, stderr = executor.execute_command(
+                "echo 'Hello from server 1'", context="test echo server 1",
+            )
             _report("RESULT", "Command output:")
             _report_result(rc, stdout, stderr)
 
@@ -557,7 +561,9 @@ class TestCommandExecution:
             port=srv2.port,
         ) as mgr:
             executor = SSHCommandExecutor(mgr)
-            rc, stdout, stderr = executor.execute_command("echo 'Hello from server 2'")
+            rc, stdout, stderr = executor.execute_command(
+                "echo 'Hello from server 2'", context="test echo server 2",
+            )
             _report("RESULT", "Command output:")
             _report_result(rc, stdout, stderr)
 
@@ -574,13 +580,21 @@ class TestCommandExecution:
             port=srv1.port,
         ) as mgr:
             executor = SSHCommandExecutor(mgr)
-            rc, stdout, stderr = executor.execute_command("exit 42")
-            _report("RESULT", "Command output:")
-            _report_result(rc, stdout, stderr)
 
-            _report("ASSERT", "return_code == 42")
-            assert rc == 42
-        _report("PASS", "Non-zero exit code correctly reported")
+            with pytest.raises(SSHCommandError) as exc_info:
+                executor.execute_command("exit 42", context="test non-zero exit")
+
+            err = exc_info.value
+            _report("CAUGHT", f"SSHCommandError: rc={err.return_code}, command={err.command!r}")
+            assert err.return_code == 42
+            assert err.command == "exit 42"
+            assert isinstance(err.stdout, str)
+            assert isinstance(err.stderr, str)
+            # SSHCommandError is NOT under SSHConnectionError
+            assert not isinstance(err, SSHConnectionError)
+            # But it IS under LinuxSSHToolsError
+            assert isinstance(err, LinuxSSHToolsError)
+        _report("PASS", "Non-zero exit correctly raises SSHCommandError")
 
 
 class TestMultipleConnections:
@@ -600,8 +614,8 @@ class TestMultipleConnections:
         )
 
         try:
-            mgr1.connect()
-            mgr2.connect()
+            mgr1.connect(context="test dual conn mgr1")
+            mgr2.connect(context="test dual conn mgr2")
 
             _report("ASSERT", f"mgr1.is_connected() → {mgr1.is_connected()}")
             assert mgr1.is_connected()
@@ -611,8 +625,8 @@ class TestMultipleConnections:
             exec1 = SSHCommandExecutor(mgr1)
             exec2 = SSHCommandExecutor(mgr2)
 
-            rc1, out1, _ = exec1.execute_command("echo server1")
-            rc2, out2, _ = exec2.execute_command("echo server2")
+            rc1, out1, _ = exec1.execute_command("echo server1", context="test dual exec 1")
+            rc2, out2, _ = exec2.execute_command("echo server2", context="test dual exec 2")
 
             _report("RESULT", f"Server 1: rc={rc1}, stdout={out1.strip()!r}")
             _report("RESULT", f"Server 2: rc={rc2}, stdout={out2.strip()!r}")
@@ -647,7 +661,7 @@ class TestErrorHandling:
         )
 
         with pytest.raises(SSHConnectionError) as exc_info:
-            mgr.connect()
+            mgr.connect(context="test connection refused")
 
         _report("CAUGHT", f"{type(exc_info.value).__name__}: {exc_info.value}")
         _report("PASS", "SSHConnectionError raised for refused connection")
@@ -665,7 +679,7 @@ class TestErrorHandling:
             )
 
             with pytest.raises(SSHConnectionError) as exc_info:
-                mgr.connect()
+                mgr.connect(context="test connection timeout")
 
             _report("CAUGHT", f"{type(exc_info.value).__name__}: {exc_info.value}")
             _report("PASS", "Connection error raised for unresponsive server")
@@ -681,7 +695,7 @@ class TestErrorHandling:
         )
 
         with pytest.raises(SSHConnectionError) as exc_info:
-            mgr.connect()
+            mgr.connect(context="test bad password")
 
         _report("CAUGHT", f"{type(exc_info.value).__name__}: {exc_info.value}")
         _report("PASS", "SSHConnectionError raised for bad credentials")
@@ -696,7 +710,7 @@ class TestErrorHandling:
         executor = SSHCommandExecutor(mgr)
 
         with pytest.raises(SSHConnectionError) as exc_info:
-            executor.execute_command("echo should_not_run")
+            executor.execute_command("echo should_not_run", context="test no connection")
 
         _report("CAUGHT", f"{type(exc_info.value).__name__}: {exc_info.value}")
         _report("PASS", "Correctly refused to execute on disconnected manager")
@@ -716,7 +730,7 @@ class TestReconnection:
 
         try:
             # First connection
-            mgr.connect()
+            mgr.connect(context="test reconnect 1st")
             _report("STEP", f"1st connect: is_connected() = {mgr.is_connected()}")
             assert mgr.is_connected()
 
@@ -726,13 +740,13 @@ class TestReconnection:
             assert not mgr.is_connected()
 
             # Reconnect
-            mgr.connect()
+            mgr.connect(context="test reconnect 2nd")
             _report("STEP", f"reconnect:    is_connected() = {mgr.is_connected()}")
             assert mgr.is_connected()
 
             # Verify the reconnected session actually works
             executor = SSHCommandExecutor(mgr)
-            rc, out, _ = executor.execute_command("echo reconnected")
+            rc, out, _ = executor.execute_command("echo reconnected", context="test reconnect verify")
             _report("RESULT", f"rc={rc}, stdout={out.strip()!r}")
             assert rc == 0
             assert "reconnected" in out
@@ -755,7 +769,7 @@ class TestRetryLogic:
         ) as mgr:
             executor = SSHCommandExecutor(mgr)
             rc, stdout, stderr = executor.execute_with_retry(
-                "echo 'retry test'", max_retries=3,
+                "echo 'retry test'", context="test retry", max_retries=3,
             )
             _report("RESULT", "Command output:")
             _report_result(rc, stdout, stderr)
@@ -763,6 +777,27 @@ class TestRetryLogic:
             assert rc == 0
             assert "retry test" in stdout
         _report("PASS", "execute_with_retry completed successfully")
+
+    def test_retry_does_not_retry_command_errors(self, ssh_servers: tuple) -> None:
+        """execute_with_retry must NOT retry on SSHCommandError (non-zero exit)."""
+        srv1, _ = ssh_servers
+        _report("TEST", f"execute_with_retry('exit 1') should fail immediately (port {srv1.port})")
+
+        with SSHConnectionManager(
+            hostname=TEST_HOST, username=TEST_USER, password=TEST_PASS,
+            port=srv1.port,
+        ) as mgr:
+            executor = SSHCommandExecutor(mgr)
+
+            with pytest.raises(SSHCommandError) as exc_info:
+                executor.execute_with_retry(
+                    "exit 1", context="test no retry on cmd error", max_retries=3,
+                )
+
+            err = exc_info.value
+            _report("CAUGHT", f"SSHCommandError: rc={err.return_code}")
+            assert err.return_code == 1
+        _report("PASS", "Command error propagated immediately without retry")
 
 
 class TestConcurrentCommands:
@@ -785,7 +820,9 @@ class TestConcurrentCommands:
             ]
 
             for i, cmd in enumerate(commands, 1):
-                rc, stdout, stderr = executor.execute_command(cmd)
+                rc, stdout, stderr = executor.execute_command(
+                    cmd, context=f"test batch cmd {i}",
+                )
                 _report(f"CMD {i}", f"rc={rc}, stdout={stdout.strip()!r}")
                 assert rc == 0
                 assert f"Command {i}" in stdout
@@ -804,7 +841,7 @@ class TestDisconnectReporting:
             hostname=TEST_HOST, username=TEST_USER, password=TEST_PASS,
             port=srv1.port,
         )
-        mgr.connect()
+        mgr.connect(context="test disconnect reporting")
         _report("STEP", f"Connected: is_connected() = {mgr.is_connected()}")
         assert mgr.is_connected()
 
@@ -818,6 +855,22 @@ class TestDisconnectReporting:
         mgr.disconnect()
         _report("STEP", "2nd disconnect: no error raised (idempotent)")
         _report("PASS", "Disconnect reported and is idempotent")
+
+
+class TestExceptionHierarchy:
+    """Verify exception class relationships."""
+
+    def test_ssh_command_error_not_under_connection_error(self) -> None:
+        _report("TEST", "SSHCommandError should NOT be a subclass of SSHConnectionError")
+        assert not issubclass(SSHCommandError, SSHConnectionError)
+        _report("PASS", "SSHCommandError is a sibling, not a child of SSHConnectionError")
+
+    def test_all_under_common_base(self) -> None:
+        _report("TEST", "All exceptions should descend from LinuxSSHToolsError")
+        assert issubclass(SSHConnectionError, LinuxSSHToolsError)
+        assert issubclass(SSHTimeoutError, LinuxSSHToolsError)
+        assert issubclass(SSHCommandError, LinuxSSHToolsError)
+        _report("PASS", "Common base exception hierarchy is correct")
 
 
 # ---------------------------------------------------------------------------

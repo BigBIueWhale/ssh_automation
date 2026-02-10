@@ -12,7 +12,7 @@ import paramiko
 from typeguard import typechecked
 
 from . import SSH_PORT, CONNECTION_TIMEOUT, COMMAND_TIMEOUT
-from .exceptions import SSHConnectionError, SSHTimeoutError
+from .exceptions import SSHConnectionError, SSHTimeoutError, SSHCommandError
 
 logger = logging.getLogger("linux_ssh_tools.connection")
 
@@ -85,16 +85,20 @@ class SSHConnectionManager:
 
         return self.ssh_client
 
-    def connect(self) -> None:
+    def connect(self, context: str) -> None:
         """Establish SSH connection to the Linux device.
+
+        Args:
+            context: Description of the purpose of this connection,
+                embedded into error messages.
 
         Raises:
             SSHConnectionError: If connection fails
             SSHTimeoutError: If connection times out
         """
         logger.info(
-            "[CONNECT] Attempting SSH connection to %s@%s:%d (timeout=%ds) ...",
-            self.username, self.hostname, self.port, self.timeout,
+            "[CONNECT] [%s] Attempting SSH connection to %s@%s:%d (timeout=%ds) ...",
+            context, self.username, self.hostname, self.port, self.timeout,
         )
         start_time = time.time()
 
@@ -113,30 +117,30 @@ class SSHConnectionManager:
 
             elapsed = time.time() - start_time
             logger.info(
-                "[CONNECT] Successfully connected to %s@%s:%d in %.2fs",
-                self.username, self.hostname, self.port, elapsed,
+                "[CONNECT] [%s] Successfully connected to %s@%s:%d in %.2fs",
+                context, self.username, self.hostname, self.port, elapsed,
             )
 
         except socket.timeout as e:
             elapsed = time.time() - start_time
             msg = (
-                f"Connection to {self.hostname}:{self.port} timed out "
+                f"[{context}] Connection to {self.hostname}:{self.port} timed out "
                 f"after {elapsed:.1f}s (limit {self.timeout}s)"
             )
             logger.error("[CONNECT] TIMEOUT — %s", msg)
             raise SSHTimeoutError(msg) from e
         except paramiko.AuthenticationException as e:
-            msg = f"Authentication failed for {self.username}@{self.hostname}:{self.port}: {e}"
+            msg = f"[{context}] Authentication failed for {self.username}@{self.hostname}:{self.port}: {e}"
             logger.error("[CONNECT] AUTH FAILED — %s", msg)
             raise SSHConnectionError(msg) from e
         except paramiko.SSHException as e:
             elapsed = time.time() - start_time
-            msg = f"SSH error connecting to {self.hostname}:{self.port}: {e}"
+            msg = f"[{context}] SSH error connecting to {self.hostname}:{self.port}: {e}"
             logger.error("[CONNECT] SSH ERROR after %.2fs — %s", elapsed, msg)
             raise SSHConnectionError(msg) from e
         except OSError as e:
             elapsed = time.time() - start_time
-            msg = f"OS/network error connecting to {self.hostname}:{self.port}: {e}"
+            msg = f"[{context}] OS/network error connecting to {self.hostname}:{self.port}: {e}"
             logger.error("[CONNECT] OS ERROR after %.2fs — %s", elapsed, msg)
             raise SSHConnectionError(msg) from e
 
@@ -167,7 +171,7 @@ class SSHConnectionManager:
 
     def __enter__(self) -> SSHConnectionManager:
         """Context manager entry."""
-        self.connect()
+        self.connect(context=f"Connecting to {self.hostname}:{self.port}")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:  # type: ignore[no-untyped-def]
@@ -197,6 +201,7 @@ class SSHCommandExecutor:
     def execute_command(
         self,
         command: str,
+        context: str,
         timeout: int = COMMAND_TIMEOUT,
         get_pty: bool = False,
     ) -> Tuple[int, str, str]:
@@ -204,6 +209,7 @@ class SSHCommandExecutor:
 
         Args:
             command: Command to execute
+            context: Description of the purpose, embedded into error messages.
             timeout: Command timeout in seconds
             get_pty: Whether to allocate a pseudo-terminal
 
@@ -212,16 +218,17 @@ class SSHCommandExecutor:
 
         Raises:
             SSHConnectionError: If connection is not active
+            SSHCommandError: If the command exits with a non-zero return code
         """
         host = self.connection_manager.hostname
         port = self.connection_manager.port
 
         if not self.connection_manager.is_connected():
-            msg = f"Cannot execute command: not connected to {host}:{port}"
+            msg = f"[{context}] Cannot execute command: not connected to {host}:{port}"
             logger.error("[EXEC] %s", msg)
             raise SSHConnectionError(msg)
 
-        logger.info("[EXEC] Running on %s:%d — %r", host, port, command)
+        logger.info("[EXEC] [%s] Running on %s:%d — %r", context, host, port, command)
 
         client = self.connection_manager._get_ssh_client()
 
@@ -237,44 +244,64 @@ class SSHCommandExecutor:
             return_code = stdout.channel.recv_exit_status()
 
             logger.info(
-                "[EXEC] Completed on %s:%d — rc=%d, stdout=%d bytes, stderr=%d bytes",
-                host, port, return_code, len(stdout_output), len(stderr_output),
+                "[EXEC] [%s] Completed on %s:%d — rc=%d, stdout=%d bytes, stderr=%d bytes",
+                context, host, port, return_code, len(stdout_output), len(stderr_output),
             )
+
             if return_code != 0:
-                logger.warning(
-                    "[EXEC] Non-zero exit %d for %r on %s:%d | stderr: %s",
-                    return_code, command, host, port,
-                    stderr_output.strip()[:200] or "(empty)",
+                msg = (
+                    f"[{context}] Command {command!r} failed on {host}:{port} "
+                    f"with exit code {return_code}. "
+                    f"stderr: {stderr_output.strip()[:200] or '(empty)'}"
+                )
+                logger.warning("[EXEC] %s", msg)
+                raise SSHCommandError(
+                    msg,
+                    command=command,
+                    return_code=return_code,
+                    stdout=stdout_output,
+                    stderr=stderr_output,
                 )
 
             return (return_code, stdout_output, stderr_output)
 
+        except SSHCommandError:
+            raise
         except paramiko.SSHException as e:
-            msg = f"Error executing command '{command}' on {host}:{port}: {e}"
+            msg = f"[{context}] Error executing command '{command}' on {host}:{port}: {e}"
             logger.error("[EXEC] SSH ERROR — %s", msg)
             raise SSHConnectionError(msg) from e
         except Exception as e:
-            msg = f"Unexpected error executing command '{command}' on {host}:{port}: {e}"
+            msg = f"[{context}] Unexpected error executing command '{command}' on {host}:{port}: {e}"
             logger.error("[EXEC] UNEXPECTED ERROR — %s", msg)
             raise SSHConnectionError(msg) from e
 
     def execute_with_retry(
         self,
         command: str,
+        context: str,
         max_retries: int = 3,
         retry_delay: float = 1.0,
         timeout: int = COMMAND_TIMEOUT,
     ) -> Tuple[int, str, str]:
         """Execute command with retry logic.
 
+        Only retries on connection errors. Command errors (non-zero exit
+        code) propagate immediately without retry.
+
         Args:
             command: Command to execute
+            context: Description of the purpose, embedded into error messages.
             max_retries: Maximum number of retries
             retry_delay: Delay between retries in seconds
             timeout: Command timeout in seconds
 
         Returns:
             Tuple of (return_code, stdout, stderr)
+
+        Raises:
+            SSHCommandError: Immediately on non-zero exit code (no retry).
+            SSHConnectionError: After all retries are exhausted.
         """
         last_error: Optional[Exception] = None
 
@@ -282,17 +309,17 @@ class SSHCommandExecutor:
             try:
                 if attempt > 0:
                     logger.info(
-                        "[RETRY] Attempt %d/%d for %r on %s:%d",
-                        attempt + 1, max_retries, command,
+                        "[RETRY] [%s] Attempt %d/%d for %r on %s:%d",
+                        context, attempt + 1, max_retries, command,
                         self.connection_manager.hostname,
                         self.connection_manager.port,
                     )
-                return self.execute_command(command, timeout, get_pty=False)
-            except Exception as e:
+                return self.execute_command(command, context, timeout, get_pty=False)
+            except SSHConnectionError as e:
                 last_error = e
                 logger.warning(
-                    "[RETRY] Attempt %d/%d failed for %r: %s",
-                    attempt + 1, max_retries, command, e,
+                    "[RETRY] [%s] Attempt %d/%d failed for %r: %s",
+                    context, attempt + 1, max_retries, command, e,
                 )
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
@@ -300,4 +327,4 @@ class SSHCommandExecutor:
         if last_error is not None:
             raise last_error
 
-        raise SSHConnectionError(f"Command execution failed after {max_retries} attempts")
+        raise SSHConnectionError(f"[{context}] Command execution failed after {max_retries} attempts")

@@ -69,6 +69,7 @@ from linux_ssh_tools.serial_comm import (
 from linux_ssh_tools.exceptions import (
     SerialCommunicationError,
     SerialTimeoutError,
+    LinuxSSHToolsError,
 )
 
 # ---------------------------------------------------------------------------
@@ -289,7 +290,7 @@ class TestConnectionLifecycle:
         mgr = SerialConnectionManager(serial_pair.slave_path)
 
         assert not mgr.is_open()
-        mgr.open()
+        mgr.open(context="test open close")
         assert mgr.is_open()
         _report("STEP", "Opened — is_open()=True")
 
@@ -312,7 +313,7 @@ class TestConnectionLifecycle:
         # type: (VirtualSerialPair) -> None
         _report("TEST", "Double close should not raise")
         mgr = SerialConnectionManager(serial_pair.slave_path)
-        mgr.open()
+        mgr.open(context="test double close")
         mgr.close()
         mgr.close()  # second close — should be idempotent
         _report("PASS", "Double close is idempotent")
@@ -321,8 +322,8 @@ class TestConnectionLifecycle:
         # type: (VirtualSerialPair) -> None
         _report("TEST", "Double open should not raise")
         mgr = SerialConnectionManager(serial_pair.slave_path)
-        mgr.open()
-        mgr.open()  # second open — should be a no-op
+        mgr.open(context="test double open 1st")
+        mgr.open(context="test double open 2nd")  # second open — should be a no-op
         assert mgr.is_open()
         mgr.close()
         _report("PASS", "Double open is idempotent")
@@ -332,7 +333,7 @@ class TestConnectionLifecycle:
         _report("TEST", "Opening a nonexistent port should raise with hint")
         mgr = SerialConnectionManager("/dev/ttyNONEXISTENT_99")
         with pytest.raises(SerialCommunicationError) as exc_info:
-            mgr.open()
+            mgr.open(context="test nonexistent port")
         msg = str(exc_info.value)
         _report("CAUGHT", msg[:100])
         assert "/dev/ttyNONEXISTENT_99" in msg
@@ -368,7 +369,7 @@ class TestReaderOnClosedPort:
         mgr = SerialConnectionManager("/dev/ttyUSB0")
         reader = SerialReader(mgr)
         with pytest.raises(SerialCommunicationError) as exc_info:
-            reader.flush()
+            reader.flush(context="test flush closed")
         assert "not open" in str(exc_info.value).lower()
         _report("PASS", "flush() refused on closed port")
 
@@ -378,7 +379,7 @@ class TestReaderOnClosedPort:
         mgr = SerialConnectionManager("/dev/ttyUSB0")
         reader = SerialReader(mgr)
         with pytest.raises(SerialCommunicationError) as exc_info:
-            reader.read_for_duration(1000)
+            reader.read_for_duration(context="test read closed", duration_ms=1000)
         assert "not open" in str(exc_info.value).lower()
         _report("PASS", "read_for_duration() refused on closed port")
 
@@ -388,7 +389,7 @@ class TestReaderOnClosedPort:
         mgr = SerialConnectionManager("/dev/ttyUSB0")
         reader = SerialReader(mgr)
         with pytest.raises(SerialCommunicationError) as exc_info:
-            reader.flush_and_read(1000)
+            reader.flush_and_read(context="test flush_and_read closed", duration_ms=1000)
         assert "not open" in str(exc_info.value).lower()
         _report("PASS", "flush_and_read() refused on closed port")
 
@@ -398,7 +399,7 @@ class TestReaderOnClosedPort:
         with SerialConnectionManager(serial_pair.slave_path) as mgr:
             reader = SerialReader(mgr)
             with pytest.raises(SerialCommunicationError) as exc_info:
-                reader.read_for_duration(-1)
+                reader.read_for_duration(context="test invalid duration", duration_ms=-1)
             assert "duration" in str(exc_info.value).lower()
         _report("PASS", "Negative duration rejected")
 
@@ -415,7 +416,7 @@ class TestSerialReaderVirtual:
         _report("TEST", "flush() on empty buffer returns 0")
         with SerialConnectionManager(serial_pair.slave_path) as mgr:
             reader = SerialReader(mgr)
-            discarded = reader.flush()
+            discarded = reader.flush(context="test flush empty")
             _report("RESULT", "Discarded {} bytes".format(discarded))
             assert discarded == 0
         _report("PASS", "Flush on empty buffer returns 0")
@@ -430,7 +431,7 @@ class TestSerialReaderVirtual:
             time.sleep(0.2)  # let bytes propagate into the open port's buffer
 
             reader = SerialReader(mgr)
-            discarded = reader.flush()
+            discarded = reader.flush(context="test flush stale")
             _report("RESULT", "Discarded {} bytes".format(discarded))
             assert discarded > 0
         _report("PASS", "Stale data flushed")
@@ -449,8 +450,10 @@ class TestSerialReaderVirtual:
 
         with SerialConnectionManager(serial_pair.slave_path) as mgr:
             reader = SerialReader(mgr)
-            reader.flush()
-            decoded, nbytes, elapsed = reader.read_for_duration(duration_ms=1000)
+            reader.flush(context="test read data flush")
+            decoded, nbytes, elapsed = reader.read_for_duration(
+                context="test read data", duration_ms=1000,
+            )
             _report("RESULT", "Got {} bytes in {:.3f}s: {!r}".format(
                 nbytes, elapsed, decoded,
             ))
@@ -465,9 +468,9 @@ class TestSerialReaderVirtual:
         _report("TEST", "read_for_duration() with no data raises SerialTimeoutError")
         with SerialConnectionManager(serial_pair.slave_path) as mgr:
             reader = SerialReader(mgr)
-            reader.flush()
+            reader.flush(context="test timeout flush")
             with pytest.raises(SerialTimeoutError) as exc_info:
-                reader.read_for_duration(duration_ms=300)
+                reader.read_for_duration(context="test timeout read", duration_ms=300)
             _report("CAUGHT", str(exc_info.value)[:80])
         _report("PASS", "SerialTimeoutError raised on silent line")
 
@@ -489,7 +492,7 @@ class TestSerialReaderVirtual:
 
         with SerialConnectionManager(serial_pair.slave_path) as mgr:
             reader = SerialReader(mgr)
-            result = reader.flush_and_read(duration_ms=1000)
+            result = reader.flush_and_read(context="test flush_and_read", duration_ms=1000)
             _report("RESULT", "Got: {!r}".format(result))
             assert "FRESH_DATA" in result
             # The stale "OLD_NOISE" should NOT be in the result
@@ -517,7 +520,7 @@ class TestSerialReaderVirtual:
 
         with SerialConnectionManager(serial_pair.slave_path) as mgr:
             reader = SerialReader(mgr)
-            result = reader.write_and_read("PING", duration_ms=1000)
+            result = reader.write_and_read("PING", context="test write_and_read", duration_ms=1000)
             _report("RESULT", "Got: {!r}".format(result))
             assert "ECHO:" in result
 
@@ -538,7 +541,7 @@ class TestCommandExecutorClosedPort:
         mgr = SerialConnectionManager("/dev/ttyUSB0")
         executor = SerialCommandExecutor(mgr)
         with pytest.raises(SerialCommunicationError) as exc_info:
-            executor.execute_command("test")
+            executor.execute_command("test", context="test exec closed")
         assert "not open" in str(exc_info.value).lower()
         _report("PASS", "execute_command() refused on closed port")
 
@@ -550,7 +553,7 @@ class TestCommandExecutorClosedPort:
         with SerialConnectionManager(serial_pair.slave_path) as mgr:
             executor = SerialCommandExecutor(mgr)
             with pytest.raises(SerialCommunicationError) as exc_info:
-                executor.execute_command("test", timeout_ms=-1)
+                executor.execute_command("test", context="test bad timeout", timeout_ms=-1)
             assert "timeout" in str(exc_info.value).lower()
         _report("PASS", "Negative timeout rejected")
 
@@ -581,8 +584,10 @@ class TestCommandExecutorVirtual:
 
         with SerialConnectionManager(serial_pair.slave_path) as mgr:
             executor = SerialCommandExecutor(mgr)
+            # No stop_condition → runs for full timeout, returns normally
             result = executor.execute_command(
                 "silent_command",
+                context="test silent line",
                 timeout_ms=500,
                 prompt_settle_ms=50,
             )
@@ -624,6 +629,7 @@ class TestCommandExecutorVirtual:
             executor = SerialCommandExecutor(mgr)
             result = executor.execute_command(
                 "ls /",
+                context="test exec with response",
                 timeout_ms=3000,
                 stop_condition=lambda text: "# " in text,
                 prompt_settle_ms=50,
@@ -670,6 +676,7 @@ class TestCommandExecutorVirtual:
             executor = SerialCommandExecutor(mgr)
             result = executor.execute_command(
                 "hello",
+                context="test streaming callback",
                 timeout_ms=3000,
                 stop_condition=lambda text: "DONE" in text,
                 on_data=lambda chunk: streamed_chunks.append(chunk),
@@ -688,7 +695,7 @@ class TestCommandExecutorVirtual:
 
     def test_execute_stop_condition_not_met_times_out(self, serial_pair):
         # type: (VirtualSerialPair) -> None
-        _report("TEST", "stop_condition that never matches → timed_out=True")
+        _report("TEST", "stop_condition that never matches → SerialTimeoutError")
 
         def simulated_device():
             # type: () -> None
@@ -710,26 +717,32 @@ class TestCommandExecutorVirtual:
 
         with SerialConnectionManager(serial_pair.slave_path) as mgr:
             executor = SerialCommandExecutor(mgr)
-            result = executor.execute_command(
-                "cmd",
-                timeout_ms=800,
-                stop_condition=lambda text: "NEVER_APPEARS" in text,
-                prompt_settle_ms=50,
-            )
-            _report("RESULT", "timed_out={}, output={!r}".format(
-                result.timed_out, result.output[:60],
-            ))
-            assert result.timed_out is True
-            assert result.stopped_by_condition is False
-            # Data was still captured even though condition didn't match
-            assert result.bytes_received >= 0
+
+            with pytest.raises(SerialTimeoutError) as exc_info:
+                executor.execute_command(
+                    "cmd",
+                    context="test stop condition timeout",
+                    timeout_ms=800,
+                    stop_condition=lambda text: "NEVER_APPEARS" in text,
+                    prompt_settle_ms=50,
+                )
+
+            err = exc_info.value
+            _report("CAUGHT", "SerialTimeoutError: {}".format(str(err)[:80]))
+            assert err.result is not None
+            assert err.result.timed_out is True
+            assert err.result.stopped_by_condition is False
+            assert err.result.command == "cmd"
+            assert err.result.bytes_received >= 0
+            # Also a LinuxSSHToolsError
+            assert isinstance(err, LinuxSSHToolsError)
 
         t.join(timeout=3)
-        _report("PASS", "Timed out correctly when stop condition never matches")
+        _report("PASS", "SerialTimeoutError raised with .result attached")
 
     def test_execute_no_stop_condition_runs_full_duration(self, serial_pair):
         # type: (VirtualSerialPair) -> None
-        _report("TEST", "No stop_condition → runs for full timeout")
+        _report("TEST", "No stop_condition → runs for full timeout, returns normally")
 
         def simulated_device():
             # type: () -> None
@@ -754,6 +767,7 @@ class TestCommandExecutorVirtual:
             start = time.monotonic()
             result = executor.execute_command(
                 "wait",
+                context="test no stop condition",
                 timeout_ms=600,
                 stop_condition=None,
                 prompt_settle_ms=50,
@@ -800,6 +814,7 @@ class TestCommandExecutorVirtual:
             executor = SerialCommandExecutor(mgr)
             result = executor.execute_command(
                 "crash",
+                context="test buggy callback",
                 timeout_ms=2000,
                 stop_condition=lambda text: "# " in text,
                 on_data=bad_callback,
@@ -853,6 +868,7 @@ class TestCommandExecutorVirtual:
             executor = SerialCommandExecutor(mgr)
             result = executor.execute_command(
                 "bugcond",
+                context="test buggy stop condition",
                 timeout_ms=3000,
                 stop_condition=buggy_condition,
                 prompt_settle_ms=50,
@@ -888,6 +904,279 @@ class TestTypeguardEnforcement:
         with pytest.raises(_TYPEGUARD_ERRORS):
             SerialCommandExecutor(123)  # type: ignore[arg-type]
         _report("PASS", "TypeError raised for wrong type")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TESTS — SSH-trigger → serial-capture workflow
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestSSHTriggerSerialCapture:
+    """Verify the critical use-case: run an SSH command that produces serial
+    output, then capture that output via ``flush()`` + ``read_for_duration()``.
+
+    The SSH call itself is simulated with ``time.sleep()`` (blocking) and a
+    background thread that writes to the master end of the PTY pair at
+    controlled times.  This exercises the actual OS serial buffering
+    behaviour — the serial port must be **open** before the "SSH call" so
+    the kernel collects incoming bytes while the caller is blocked.
+
+    The correct ordering is::
+
+        serial port open  →  flush  →  SSH command (blocks)  →  read
+
+    Using ``flush()`` + ``read_for_duration()`` separately (NOT
+    ``flush_and_read()``) so the SSH call can run between them.
+    """
+
+    def test_data_buffered_during_blocking_call(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        """Data that arrives on the serial line while the caller is blocked
+        (simulated SSH) is held in the OS buffer and captured by the
+        subsequent ``read_for_duration()``."""
+        _report("TEST", "Data buffered during blocking call")
+
+        with SerialConnectionManager(serial_pair.slave_path) as mgr:
+            reader = SerialReader(mgr)
+            reader.flush(context="pre-ssh flush")
+
+            # --- simulate SSH command that triggers serial output ---
+            serial_pair.write_to_master(b"SERIAL_RESPONSE_ABC")
+
+            # simulate blocking SSH call (data sits in OS buffer)
+            time.sleep(0.3)
+
+            # --- after SSH returns, read the serial buffer ---
+            text, nbytes, elapsed = reader.read_for_duration(
+                context="capture after ssh",
+                duration_ms=500,
+            )
+
+            _report("RESULT", "Got {} bytes: {!r}".format(nbytes, text[:80]))
+            assert "SERIAL_RESPONSE_ABC" in text
+            assert nbytes > 0
+
+        _report("PASS", "OS buffer held data during blocking call")
+
+    def test_stale_data_excluded_fresh_captured(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        """Stale data already in the buffer before ``flush()`` is discarded.
+        Only data arriving *after* the flush (i.e. during the simulated SSH
+        call) is returned by ``read_for_duration()``."""
+        _report("TEST", "Stale excluded, fresh captured")
+
+        with SerialConnectionManager(serial_pair.slave_path) as mgr:
+            # inject stale data BEFORE flush
+            serial_pair.write_to_master(b"OLD_STALE_NOISE_XYZ")
+            time.sleep(0.15)  # let bytes propagate
+
+            reader = SerialReader(mgr)
+            discarded = reader.flush(context="clear stale before ssh")
+            _report("STEP", "Flushed {} stale bytes".format(discarded))
+            assert discarded > 0
+
+            # --- simulate SSH command producing serial output ---
+            serial_pair.write_to_master(b"FRESH_SSH_TRIGGERED")
+            time.sleep(0.2)  # simulate SSH blocking
+
+            text, nbytes, elapsed = reader.read_for_duration(
+                context="capture after ssh",
+                duration_ms=500,
+            )
+
+            _report("RESULT", "Got {!r}".format(text[:80]))
+            assert "FRESH_SSH_TRIGGERED" in text
+            assert "OLD_STALE_NOISE_XYZ" not in text
+
+        _report("PASS", "Only post-flush data captured")
+
+    def test_multi_chunk_during_blocking(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        """Multiple serial chunks arriving at staggered times during the
+        blocking SSH call are all captured when ``read_for_duration()``
+        runs afterward."""
+        _report("TEST", "Multiple chunks during blocking call")
+
+        def staggered_serial_output():
+            # type: () -> None
+            time.sleep(0.05)
+            serial_pair.write_to_master(b"CHUNK_A_")
+            time.sleep(0.08)
+            serial_pair.write_to_master(b"CHUNK_B_")
+            time.sleep(0.08)
+            serial_pair.write_to_master(b"CHUNK_C_END")
+
+        t = threading.Thread(target=staggered_serial_output, daemon=True)
+        t.start()
+
+        with SerialConnectionManager(serial_pair.slave_path) as mgr:
+            reader = SerialReader(mgr)
+            reader.flush(context="pre-ssh flush")
+
+            # simulate blocking SSH call — longer than all chunks
+            time.sleep(0.4)
+
+            text, nbytes, elapsed = reader.read_for_duration(
+                context="capture staggered chunks",
+                duration_ms=500,
+            )
+
+            _report("RESULT", "Got {} bytes: {!r}".format(nbytes, text[:80]))
+            assert "CHUNK_A_" in text
+            assert "CHUNK_B_" in text
+            assert "CHUNK_C_END" in text
+
+        t.join(timeout=2)
+        _report("PASS", "All staggered chunks captured from OS buffer")
+
+    def test_delayed_response_within_read_window(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        """If the SSH command returns quickly but the serial response is
+        delayed (device processing time), ``read_for_duration()`` still
+        captures it because it listens for the full duration."""
+        _report("TEST", "Delayed serial response within read window")
+
+        def delayed_response():
+            # type: () -> None
+            # Serial output arrives 300ms into the read window
+            time.sleep(0.3)
+            serial_pair.write_to_master(b"DELAYED_UART_REPLY")
+
+        with SerialConnectionManager(serial_pair.slave_path) as mgr:
+            reader = SerialReader(mgr)
+            reader.flush(context="pre-ssh flush")
+
+            # SSH command returns almost instantly
+            time.sleep(0.05)
+
+            # But serial response is delayed — start the writer thread
+            # right before read_for_duration so the data arrives mid-read
+            t = threading.Thread(target=delayed_response, daemon=True)
+            t.start()
+
+            text, nbytes, elapsed = reader.read_for_duration(
+                context="capture delayed response",
+                duration_ms=1000,
+            )
+
+            _report("RESULT", "Got {} bytes in {:.2f}s: {!r}".format(
+                nbytes, elapsed, text[:80],
+            ))
+            assert "DELAYED_UART_REPLY" in text
+
+        t.join(timeout=2)
+        _report("PASS", "Delayed response captured within read window")
+
+    def test_full_end_to_end_workflow(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        """End-to-end simulation of the documented workflow:
+
+        1. Open serial port
+        2. Stale data is in the buffer (from previous activity)
+        3. Flush clears the stale data
+        4. Simulated SSH command blocks; serial response arrives mid-block
+        5. SSH returns; read_for_duration() captures the serial response
+        6. Result contains only the fresh response, not the stale data
+        """
+        _report("TEST", "Full end-to-end SSH→serial workflow")
+
+        with SerialConnectionManager(serial_pair.slave_path) as mgr:
+            # --- Phase 1: stale data sitting in the buffer ---
+            serial_pair.write_to_master(b"BOOTLOG_NOISE_999\r\n")
+            time.sleep(0.15)
+
+            reader = SerialReader(mgr)
+
+            # --- Phase 2: flush ---
+            discarded = reader.flush(context="clear before ssh trigger")
+            _report("STEP", "Phase 2: flushed {} stale bytes".format(discarded))
+            assert discarded > 0
+
+            # --- Phase 3: SSH command triggers serial output ---
+            def ssh_command_simulation():
+                # type: () -> None
+                """Simulate: SSH command executes on remote device, the device
+                writes a response to its serial port after 100ms of processing."""
+                time.sleep(0.1)
+                serial_pair.write_to_master(b"UART: voltage=3.31V\r\n")
+
+            t = threading.Thread(target=ssh_command_simulation, daemon=True)
+            t.start()
+
+            # Simulate the SSH call blocking for 300ms
+            time.sleep(0.3)
+            _report("STEP", "Phase 3: simulated SSH call returned")
+
+            # --- Phase 4: read the serial response ---
+            text, nbytes, elapsed = reader.read_for_duration(
+                context="capture uart response after ssh",
+                duration_ms=500,
+            )
+
+            _report("RESULT", "Phase 4: {} bytes in {:.2f}s: {!r}".format(
+                nbytes, elapsed, text[:80],
+            ))
+
+            # --- Assertions ---
+            assert "UART: voltage=3.31V" in text, (
+                "Fresh serial response must be captured"
+            )
+            assert "BOOTLOG_NOISE_999" not in text, (
+                "Stale data from before flush must NOT appear"
+            )
+            assert nbytes > 0
+
+            t.join(timeout=2)
+
+        _report("PASS", "Full workflow: stale excluded, SSH-triggered response captured")
+
+    def test_flush_and_read_is_wrong_for_this_usecase(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        """Demonstrates that ``flush_and_read()`` CANNOT be used for the
+        SSH-trigger use-case: it flushes and immediately reads, leaving no
+        window to run the SSH command.  Data injected *before* calling
+        ``flush_and_read()`` is discarded by the flush phase.
+
+        This negative test documents WHY the README uses the separate
+        ``flush()`` + ``read_for_duration()`` pattern.
+        """
+        _report("TEST", "flush_and_read() is wrong for SSH-trigger use-case")
+
+        with SerialConnectionManager(serial_pair.slave_path) as mgr:
+            reader = SerialReader(mgr)
+
+            # Inject data that would be the "SSH-triggered serial response".
+            # With the CORRECT pattern (flush → SSH → read), this data would
+            # arrive AFTER the flush.  But with flush_and_read(), the flush
+            # and read happen back-to-back — there's no window for the SSH
+            # call.  We simulate by injecting data first, which flush_and_read
+            # will discard as "stale".
+            serial_pair.write_to_master(b"RESPONSE_THAT_GETS_LOST")
+            time.sleep(0.15)
+
+            # flush_and_read: flush discards the data, then read finds silence
+            with pytest.raises(SerialTimeoutError):
+                reader.flush_and_read(
+                    context="wrong pattern for ssh trigger",
+                    duration_ms=300,
+                )
+
+        _report("PASS", "flush_and_read() correctly cannot handle SSH-trigger pattern")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TESTS — Exception Hierarchy
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestSerialExceptionHierarchy:
+    """Verify serial exception class relationships."""
+
+    def test_serial_exceptions_under_common_base(self):
+        # type: () -> None
+        _report("TEST", "Serial exceptions should descend from LinuxSSHToolsError")
+        assert issubclass(SerialCommunicationError, LinuxSSHToolsError)
+        assert issubclass(SerialTimeoutError, LinuxSSHToolsError)
+        assert issubclass(SerialTimeoutError, SerialCommunicationError)
+        _report("PASS", "Serial exception hierarchy is correct")
 
 
 # ---------------------------------------------------------------------------
