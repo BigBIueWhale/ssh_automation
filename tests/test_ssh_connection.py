@@ -873,6 +873,157 @@ class TestExceptionHierarchy:
         _report("PASS", "Common base exception hierarchy is correct")
 
 
+_IS_WINDOWS = platform.system() == "Windows"
+
+
+class TestProgrammaticCommandsWithArgs:
+    """Verify that commands with flags, pipes, chaining, and shell constructs
+    execute correctly through SSHCommandExecutor on a real in-process server."""
+
+    def test_command_with_multiple_args(self, ssh_servers: tuple) -> None:
+        srv1, _ = ssh_servers
+        _report("TEST", "echo hello world (multiple arguments)")
+
+        with SSHConnectionManager(
+            hostname=TEST_HOST, username=TEST_USER, password=TEST_PASS,
+            port=srv1.port,
+        ) as mgr:
+            executor = SSHCommandExecutor(mgr)
+            rc, stdout, stderr = executor.execute_command(
+                "echo hello world", context="test multiple args",
+            )
+            _report_result(rc, stdout, stderr)
+            assert rc == 0
+            assert "hello world" in stdout
+        _report("PASS", "Multiple arguments handled correctly")
+
+    def test_command_with_quoted_args(self, ssh_servers: tuple) -> None:
+        srv1, _ = ssh_servers
+        _report("TEST", 'echo "arg one" "arg two" (quoted arguments)')
+
+        with SSHConnectionManager(
+            hostname=TEST_HOST, username=TEST_USER, password=TEST_PASS,
+            port=srv1.port,
+        ) as mgr:
+            executor = SSHCommandExecutor(mgr)
+            rc, stdout, stderr = executor.execute_command(
+                'echo "arg one" "arg two"', context="test quoted args",
+            )
+            _report_result(rc, stdout, stderr)
+            assert rc == 0
+            assert "arg one" in stdout
+            assert "arg two" in stdout
+        _report("PASS", "Quoted arguments handled correctly")
+
+    def test_pipe_command(self, ssh_servers: tuple) -> None:
+        srv1, _ = ssh_servers
+        _report("TEST", "echo hello | sort (pipe)")
+
+        with SSHConnectionManager(
+            hostname=TEST_HOST, username=TEST_USER, password=TEST_PASS,
+            port=srv1.port,
+        ) as mgr:
+            executor = SSHCommandExecutor(mgr)
+            rc, stdout, stderr = executor.execute_command(
+                "echo hello | sort", context="test pipe command",
+            )
+            _report_result(rc, stdout, stderr)
+            assert rc == 0
+            assert "hello" in stdout
+        _report("PASS", "Pipe command handled correctly")
+
+    def test_chained_and_commands(self, ssh_servers: tuple) -> None:
+        srv1, _ = ssh_servers
+        _report("TEST", "echo first && echo second (AND chaining)")
+
+        with SSHConnectionManager(
+            hostname=TEST_HOST, username=TEST_USER, password=TEST_PASS,
+            port=srv1.port,
+        ) as mgr:
+            executor = SSHCommandExecutor(mgr)
+            rc, stdout, stderr = executor.execute_command(
+                "echo first && echo second", context="test chained and",
+            )
+            _report_result(rc, stdout, stderr)
+            assert rc == 0
+            assert "first" in stdout
+            assert "second" in stdout
+        _report("PASS", "AND-chained commands handled correctly")
+
+    def test_chained_or_commands(self, ssh_servers: tuple) -> None:
+        srv1, _ = ssh_servers
+        _report("TEST", "false || echo fallback (OR chaining)")
+
+        with SSHConnectionManager(
+            hostname=TEST_HOST, username=TEST_USER, password=TEST_PASS,
+            port=srv1.port,
+        ) as mgr:
+            executor = SSHCommandExecutor(mgr)
+            rc, stdout, stderr = executor.execute_command(
+                "false || echo fallback", context="test chained or",
+            )
+            _report_result(rc, stdout, stderr)
+            assert rc == 0
+            assert "fallback" in stdout
+        _report("PASS", "OR-chained commands handled correctly")
+
+    @pytest.mark.skipif(_IS_WINDOWS, reason="Shell variable expansion is Linux-only")
+    def test_command_with_env_var(self, ssh_servers: tuple) -> None:
+        srv1, _ = ssh_servers
+        _report("TEST", "TEST_VAR=hello && echo $TEST_VAR (env variable)")
+
+        with SSHConnectionManager(
+            hostname=TEST_HOST, username=TEST_USER, password=TEST_PASS,
+            port=srv1.port,
+        ) as mgr:
+            executor = SSHCommandExecutor(mgr)
+            rc, stdout, stderr = executor.execute_command(
+                "TEST_VAR=hello && echo $TEST_VAR", context="test env var",
+            )
+            _report_result(rc, stdout, stderr)
+            assert rc == 0
+            assert "hello" in stdout
+        _report("PASS", "Environment variable expansion handled correctly")
+
+    @pytest.mark.skipif(_IS_WINDOWS, reason="Command substitution is Linux-only")
+    def test_command_substitution(self, ssh_servers: tuple) -> None:
+        srv1, _ = ssh_servers
+        _report("TEST", "echo $(echo nested) (command substitution)")
+
+        with SSHConnectionManager(
+            hostname=TEST_HOST, username=TEST_USER, password=TEST_PASS,
+            port=srv1.port,
+        ) as mgr:
+            executor = SSHCommandExecutor(mgr)
+            rc, stdout, stderr = executor.execute_command(
+                "echo $(echo nested)", context="test command substitution",
+            )
+            _report_result(rc, stdout, stderr)
+            assert rc == 0
+            assert "nested" in stdout
+        _report("PASS", "Command substitution handled correctly")
+
+    def test_multiline_output_command(self, ssh_servers: tuple) -> None:
+        srv1, _ = ssh_servers
+        _report("TEST", "echo line1 && echo line2 && echo line3 (multiline output)")
+
+        with SSHConnectionManager(
+            hostname=TEST_HOST, username=TEST_USER, password=TEST_PASS,
+            port=srv1.port,
+        ) as mgr:
+            executor = SSHCommandExecutor(mgr)
+            rc, stdout, stderr = executor.execute_command(
+                "echo line1 && echo line2 && echo line3",
+                context="test multiline output",
+            )
+            _report_result(rc, stdout, stderr)
+            assert rc == 0
+            assert "line1" in stdout
+            assert "line2" in stdout
+            assert "line3" in stdout
+        _report("PASS", "Multiline output handled correctly")
+
+
 # ---------------------------------------------------------------------------
 #  Entry point for running outside pytest
 # ---------------------------------------------------------------------------

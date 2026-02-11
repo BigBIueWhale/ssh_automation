@@ -68,6 +68,50 @@ with conn:
         print(f"Command failed (exit {e.return_code}): {e.stderr}")
 ```
 
+Commands with flags, pipes, and shell constructs work as expected — the
+entire string is executed by the remote shell:
+
+```python
+from linux_ssh_tools.connection import SSHConnectionManager, SSHCommandExecutor
+
+conn = SSHConnectionManager(
+    hostname="192.168.1.100",
+    username="user",
+    password="password",
+)
+
+with conn:
+    executor = SSHCommandExecutor(conn)
+
+    # Flags and multiple arguments
+    rc, stdout, stderr = executor.execute_command(
+        "ls -la /tmp",
+        context="list tmp directory",
+    )
+    print(stdout)
+
+    # Pipes
+    rc, stdout, stderr = executor.execute_command(
+        "ps aux | grep nginx | head -5",
+        context="find nginx processes",
+    )
+    print(stdout)
+
+    # Chained commands (AND / OR)
+    rc, stdout, stderr = executor.execute_command(
+        "cd /opt/myapp && git pull && systemctl restart myapp",
+        context="deploy latest",
+    )
+    print(stdout)
+
+    # Environment variables and substitution
+    rc, stdout, stderr = executor.execute_command(
+        "LANG=C df -h / | tail -1",
+        context="check disk usage",
+    )
+    print(stdout)
+```
+
 Retry on transient connection errors (command errors are never retried):
 
 ```python
@@ -157,6 +201,32 @@ process = launcher.launch_terminal(
     context="interactive debug session",
     initial_command="top",
     window_title="Device 1 — Debug",
+)
+```
+
+The initial command can include flags, arguments, and pipes — the entire
+string is passed to the remote shell:
+
+```python
+# Monitor logs with filters — terminal stays open after Ctrl-C
+process = launcher.launch_terminal(
+    context="filtered journal",
+    initial_command="journalctl -f -u myservice --no-pager",
+    window_title="Device 1 — Service Logs",
+)
+
+# Edit a config file interactively
+process = launcher.launch_terminal(
+    context="edit config",
+    initial_command="vim /etc/myapp/config.yaml",
+    window_title="Device 1 — Edit Config",
+)
+
+# Run a pipeline — the user sees live output in the terminal
+process = launcher.launch_terminal(
+    context="live network monitor",
+    initial_command="tcpdump -i eth0 -n port 80 | head -50",
+    window_title="Device 1 — Traffic",
 )
 ```
 
@@ -345,6 +415,33 @@ with SerialConnectionManager("/dev/ttyUSB0") as serial_mgr:
         timeout_ms=2000,
     )
     print(f"Got {result.bytes_received} bytes (may be 0)")
+```
+
+With multiple independent stop strings — stop as soon as **any** of them
+appears in the output:
+
+```python
+from linux_ssh_tools.serial_comm import (
+    SerialConnectionManager,
+    SerialCommandExecutor,
+)
+
+STOP_STRINGS = ["# ", "ERROR", "PANIC", "login:"]
+
+with SerialConnectionManager("/dev/ttyUSB0") as serial_mgr:
+    executor = SerialCommandExecutor(serial_mgr)
+
+    result = executor.execute_command(
+        "reboot",
+        context="reboot and wait for prompt",
+        timeout_ms=60000,
+        stop_condition=lambda text: any(s in text for s in STOP_STRINGS),
+    )
+
+    # Determine which string actually matched
+    matched = next((s for s in STOP_STRINGS if s in result.output), None)
+    print(f"Stopped on: {matched!r}")
+    print(result.output)
 ```
 
 When a stop condition is provided but never matches, `SerialTimeoutError` is
