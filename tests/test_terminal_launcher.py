@@ -363,15 +363,16 @@ class TestLinuxTerminalCommand:
 #  TESTS — launch_terminal
 # ═══════════════════════════════════════════════════════════════════════════
 
+@patch.object(SSHTerminalLauncher, "_require_askpass_force_support")
 class TestLaunchTerminal:
     """Verify launch_terminal dispatches correctly per platform."""
 
     @patch("linux_ssh_tools.terminal.subprocess.Popen")
     @patch("linux_ssh_tools.terminal.shutil.which")
     @patch("linux_ssh_tools.terminal._IS_WINDOWS", False)
-    def test_launch_linux_success(self, mock_which, mock_popen, launcher: SSHTerminalLauncher) -> None:
+    def test_launch_linux_success(self, mock_which, mock_popen, _mock_askpass_check, launcher: SSHTerminalLauncher) -> None:
         _report("TEST", "Launch on Linux with gnome-terminal")
-        mock_which.side_effect = lambda name: "/usr/bin/gnome-terminal" if name == "gnome-terminal" else None
+        mock_which.side_effect = lambda name: f"/usr/bin/{name}" if name in ("gnome-terminal", "ssh") else None
         mock_popen.return_value = MagicMock()
 
         launcher.launch_terminal(context="test linux launch")
@@ -388,7 +389,7 @@ class TestLaunchTerminal:
     @patch("linux_ssh_tools.terminal.subprocess.Popen")
     @patch("linux_ssh_tools.terminal.shutil.which")
     @patch("linux_ssh_tools.terminal._IS_WINDOWS", True)
-    def test_launch_windows_terminal(self, mock_which, mock_popen, launcher: SSHTerminalLauncher) -> None:
+    def test_launch_windows_terminal(self, mock_which, mock_popen, _mock_askpass_check, launcher: SSHTerminalLauncher) -> None:
         _report("TEST", "Launch on Windows with wt available")
         mock_which.return_value = "C:\\wt.exe"
         mock_popen.return_value = MagicMock()
@@ -408,9 +409,9 @@ class TestLaunchTerminal:
     @patch("linux_ssh_tools.terminal.subprocess.Popen")
     @patch("linux_ssh_tools.terminal.shutil.which")
     @patch("linux_ssh_tools.terminal._IS_WINDOWS", True)
-    def test_launch_windows_cmd_fallback(self, mock_which, mock_popen, launcher: SSHTerminalLauncher) -> None:
+    def test_launch_windows_cmd_fallback(self, mock_which, mock_popen, _mock_askpass_check, launcher: SSHTerminalLauncher) -> None:
         _report("TEST", "Launch on Windows without wt — falls back to cmd")
-        mock_which.return_value = None
+        mock_which.side_effect = lambda name: "C:\\ssh.exe" if name == "ssh" else None
         mock_popen.return_value = MagicMock()
 
         with patch.object(subprocess, "CREATE_NEW_CONSOLE", 0x10, create=True):
@@ -427,7 +428,7 @@ class TestLaunchTerminal:
     @patch("linux_ssh_tools.terminal.subprocess.Popen")
     @patch("linux_ssh_tools.terminal.shutil.which")
     @patch("linux_ssh_tools.terminal._IS_WINDOWS", True)
-    def test_launch_windows_cmd_explicit(self, mock_which, mock_popen, launcher: SSHTerminalLauncher) -> None:
+    def test_launch_windows_cmd_explicit(self, mock_which, mock_popen, _mock_askpass_check, launcher: SSHTerminalLauncher) -> None:
         _report("TEST", "Launch on Windows with use_windows_terminal=False")
         mock_which.return_value = "C:\\wt.exe"  # wt exists but should be ignored
         mock_popen.return_value = MagicMock()
@@ -446,9 +447,9 @@ class TestLaunchTerminal:
     @patch("linux_ssh_tools.terminal.subprocess.Popen")
     @patch("linux_ssh_tools.terminal.shutil.which")
     @patch("linux_ssh_tools.terminal._IS_WINDOWS", False)
-    def test_launch_wraps_exception(self, mock_which, mock_popen, launcher: SSHTerminalLauncher) -> None:
+    def test_launch_wraps_exception(self, mock_which, mock_popen, _mock_askpass_check, launcher: SSHTerminalLauncher) -> None:
         _report("TEST", "OSError from Popen wraps into TerminalLaunchError")
-        mock_which.side_effect = lambda name: "/usr/bin/gnome-terminal" if name == "gnome-terminal" else None
+        mock_which.side_effect = lambda name: f"/usr/bin/{name}" if name in ("gnome-terminal", "ssh") else None
         mock_popen.side_effect = OSError("No such file")
 
         with pytest.raises(TerminalLaunchError) as exc_info:
@@ -462,9 +463,9 @@ class TestLaunchTerminal:
     @patch("linux_ssh_tools.terminal.subprocess.Popen")
     @patch("linux_ssh_tools.terminal.shutil.which")
     @patch("linux_ssh_tools.terminal._IS_WINDOWS", False)
-    def test_launch_linux_fallback_raw_ssh(self, mock_which, mock_popen, launcher: SSHTerminalLauncher) -> None:
+    def test_launch_linux_fallback_raw_ssh(self, mock_which, mock_popen, _mock_askpass_check, launcher: SSHTerminalLauncher) -> None:
         _report("TEST", "No terminal emulator found — Popen gets bare ssh args")
-        mock_which.return_value = None
+        mock_which.side_effect = lambda name: "/usr/bin/ssh" if name == "ssh" else None
         mock_popen.return_value = MagicMock()
 
         launcher.launch_terminal(context="test linux fallback")

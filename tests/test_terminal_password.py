@@ -498,7 +498,7 @@ class TestLaunchTerminalWithPassword:
         self, _mock_has, mock_which, mock_popen, launcher: SSHTerminalLauncher,
     ) -> None:
         _report("TEST", "launch_terminal with sshpass: env has SSHPASS, cmd has prefix")
-        mock_which.side_effect = lambda name: "/usr/bin/gnome-terminal" if name == "gnome-terminal" else None
+        mock_which.side_effect = lambda name: f"/usr/bin/{name}" if name in ("gnome-terminal", "ssh") else None
         mock_popen.return_value = MagicMock()
 
         launcher.launch_terminal(context="test sshpass launch")
@@ -522,15 +522,17 @@ class TestLaunchTerminalWithPassword:
         assert kwargs["env"]["SSHPASS"] == "testpass"
         _report("PASS", "sshpass prefix and SSHPASS env var present")
 
+    @patch.object(SSHTerminalLauncher, "_require_askpass_force_support")
     @patch("linux_ssh_tools.terminal.subprocess.Popen")
     @patch("linux_ssh_tools.terminal.shutil.which")
     @patch("linux_ssh_tools.terminal._IS_WINDOWS", False)
     @patch("linux_ssh_tools.terminal.SSHTerminalLauncher._has_sshpass", return_value=False)
     def test_askpass_env_in_launch(
-        self, _mock_has, mock_which, mock_popen, launcher: SSHTerminalLauncher,
+        self, _mock_has, mock_which, mock_popen, _mock_askpass_check,
+        launcher: SSHTerminalLauncher,
     ) -> None:
         _report("TEST", "launch_terminal with askpass: env has SSH_ASKPASS")
-        mock_which.side_effect = lambda name: "/usr/bin/gnome-terminal" if name == "gnome-terminal" else None
+        mock_which.side_effect = lambda name: f"/usr/bin/{name}" if name in ("gnome-terminal", "ssh") else None
         mock_popen.return_value = MagicMock()
 
         launcher.launch_terminal(context="test askpass launch")
@@ -561,7 +563,7 @@ class TestLaunchTerminalWithPassword:
     @patch("linux_ssh_tools.terminal._IS_WINDOWS", False)
     def test_no_password_no_env(self, mock_which, mock_popen) -> None:
         _report("TEST", "launch_terminal with empty password: no env manipulation")
-        mock_which.side_effect = lambda name: "/usr/bin/gnome-terminal" if name == "gnome-terminal" else None
+        mock_which.side_effect = lambda name: f"/usr/bin/{name}" if name in ("gnome-terminal", "ssh") else None
         mock_popen.return_value = MagicMock()
 
         lnch = _make_launcher(password="")
@@ -579,7 +581,7 @@ class TestLaunchTerminalWithPassword:
     @patch("linux_ssh_tools.terminal._IS_WINDOWS", False)
     def test_no_password_no_prefix(self, mock_which, mock_popen) -> None:
         _report("TEST", "launch_terminal with empty password: no sshpass prefix in cmd")
-        mock_which.side_effect = lambda name: "/usr/bin/gnome-terminal" if name == "gnome-terminal" else None
+        mock_which.side_effect = lambda name: f"/usr/bin/{name}" if name in ("gnome-terminal", "ssh") else None
         mock_popen.return_value = MagicMock()
 
         lnch = _make_launcher(password="")
@@ -592,15 +594,17 @@ class TestLaunchTerminalWithPassword:
         assert cmd[dash_dash_idx + 1] == "ssh"
         _report("PASS", "No prefix when password is empty")
 
+    @patch.object(SSHTerminalLauncher, "_require_askpass_force_support")
     @patch("linux_ssh_tools.terminal.subprocess.Popen")
     @patch("linux_ssh_tools.terminal.shutil.which")
     @patch("linux_ssh_tools.terminal._IS_WINDOWS", True)
     @patch("linux_ssh_tools.terminal.SSHTerminalLauncher._has_sshpass", return_value=False)
     def test_windows_askpass_launch(
-        self, _mock_has, mock_which, mock_popen, launcher: SSHTerminalLauncher,
+        self, _mock_has, mock_which, mock_popen, _mock_askpass_check,
+        launcher: SSHTerminalLauncher,
     ) -> None:
         _report("TEST", "launch_terminal on Windows uses SSH_ASKPASS")
-        mock_which.return_value = None  # No wt -> cmd fallback
+        mock_which.side_effect = lambda name: "C:\\ssh.exe" if name == "ssh" else None
         mock_popen.return_value = MagicMock()
 
         with patch("subprocess.CREATE_NEW_CONSOLE", 0x10, create=True):
@@ -618,6 +622,215 @@ class TestLaunchTerminalWithPassword:
         if os.path.exists(askpass_path):
             os.unlink(askpass_path)
         _report("PASS", "Windows launch sets SSH_ASKPASS env")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TESTS — SSH availability and version checks
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestRequireSshOnPath:
+    """Verify launch_terminal fails hard when ssh is missing."""
+
+    @patch("linux_ssh_tools.terminal.subprocess.Popen")
+    @patch("linux_ssh_tools.terminal.shutil.which", return_value=None)
+    @patch("linux_ssh_tools.terminal._IS_WINDOWS", False)
+    def test_raises_when_ssh_not_found_linux(self, mock_which, mock_popen) -> None:
+        _report("TEST", "Missing ssh on Linux raises TerminalLaunchError")
+        from linux_ssh_tools.exceptions import TerminalLaunchError
+        lnch = _make_launcher(password="")
+        with pytest.raises(TerminalLaunchError) as exc_info:
+            lnch.launch_terminal(context="ssh missing")
+
+        msg = str(exc_info.value)
+        _report("RESULT", f"error = {msg}")
+        assert "not installed" in msg or "not found" in msg
+        assert "192.168.1.100" in msg
+        mock_popen.assert_not_called()
+        _report("PASS", "Hard failure with clear message")
+
+    @patch("linux_ssh_tools.terminal.subprocess.Popen")
+    @patch("linux_ssh_tools.terminal.shutil.which", return_value=None)
+    @patch("linux_ssh_tools.terminal._IS_WINDOWS", True)
+    def test_raises_when_ssh_not_found_windows(self, mock_which, mock_popen) -> None:
+        _report("TEST", "Missing ssh on Windows raises TerminalLaunchError")
+        from linux_ssh_tools.exceptions import TerminalLaunchError
+        lnch = _make_launcher(password="")
+        with patch("subprocess.CREATE_NEW_CONSOLE", 0x10, create=True):
+            with pytest.raises(TerminalLaunchError) as exc_info:
+                lnch.launch_terminal(context="ssh missing win")
+
+        msg = str(exc_info.value)
+        _report("RESULT", f"error = {msg}")
+        assert "not installed" in msg or "not found" in msg
+        mock_popen.assert_not_called()
+        _report("PASS", "Hard failure on Windows too")
+
+    @patch("linux_ssh_tools.terminal.subprocess.Popen")
+    @patch("linux_ssh_tools.terminal.shutil.which")
+    @patch("linux_ssh_tools.terminal._IS_WINDOWS", False)
+    def test_passes_when_ssh_found(self, mock_which, mock_popen) -> None:
+        _report("TEST", "ssh on PATH allows launch to proceed")
+        mock_which.side_effect = lambda name: f"/usr/bin/{name}" if name in ("gnome-terminal", "ssh") else None
+        mock_popen.return_value = MagicMock()
+
+        lnch = _make_launcher(password="")
+        lnch.launch_terminal(context="ssh found")
+
+        mock_popen.assert_called_once()
+        _report("PASS", "Launch proceeds when ssh is available")
+
+
+class TestRequireAskpassForceSupport:
+    """Verify the OpenSSH version probe via ssh -G."""
+
+    @patch("linux_ssh_tools.terminal.subprocess.run")
+    def test_raises_when_ssh_too_old(self, mock_run, launcher: SSHTerminalLauncher) -> None:
+        _report("TEST", "Old OpenSSH (returncode=255) raises TerminalLaunchError")
+        from linux_ssh_tools.exceptions import TerminalLaunchError
+        mock_run.return_value = MagicMock(returncode=255)
+
+        with pytest.raises(TerminalLaunchError) as exc_info:
+            launcher._require_askpass_force_support("version check")
+
+        msg = str(exc_info.value)
+        _report("RESULT", f"error = {msg}")
+        assert "OpenSSH 8.4" in msg
+        assert "SSH_ASKPASS_REQUIRE" in msg
+        assert "Upgrade" in msg or "upgrade" in msg or "sshpass" in msg
+        _report("PASS", "Clear error explains why and what to do")
+
+    @patch("linux_ssh_tools.terminal.subprocess.run")
+    def test_passes_when_ssh_new_enough(self, mock_run, launcher: SSHTerminalLauncher) -> None:
+        _report("TEST", "Modern OpenSSH (returncode=0) passes silently")
+        mock_run.return_value = MagicMock(returncode=0)
+
+        # Should not raise
+        launcher._require_askpass_force_support("version check")
+        _report("PASS", "No error for modern SSH")
+
+    @patch("linux_ssh_tools.terminal.subprocess.run")
+    def test_raises_on_timeout(self, mock_run, launcher: SSHTerminalLauncher) -> None:
+        _report("TEST", "ssh -G timeout raises TerminalLaunchError")
+        import subprocess as sp
+        from linux_ssh_tools.exceptions import TerminalLaunchError
+        mock_run.side_effect = sp.TimeoutExpired(cmd="ssh", timeout=5)
+
+        with pytest.raises(TerminalLaunchError) as exc_info:
+            launcher._require_askpass_force_support("timeout check")
+
+        _report("RESULT", f"error = {exc_info.value}")
+        assert "verify SSH" in str(exc_info.value) or "Cannot verify" in str(exc_info.value)
+        _report("PASS", "Timeout wrapped in TerminalLaunchError")
+
+    @patch("linux_ssh_tools.terminal.subprocess.run")
+    def test_raises_on_oserror(self, mock_run, launcher: SSHTerminalLauncher) -> None:
+        _report("TEST", "ssh not executable raises TerminalLaunchError")
+        from linux_ssh_tools.exceptions import TerminalLaunchError
+        mock_run.side_effect = OSError("Permission denied")
+
+        with pytest.raises(TerminalLaunchError):
+            launcher._require_askpass_force_support("os error check")
+        _report("PASS", "OSError wrapped in TerminalLaunchError")
+
+    @patch("linux_ssh_tools.terminal.subprocess.run")
+    def test_probe_command_uses_known_hosts_command(self, mock_run, launcher: SSHTerminalLauncher) -> None:
+        _report("TEST", "Probe runs ssh -G -o KnownHostsCommand=none")
+        mock_run.return_value = MagicMock(returncode=0)
+
+        launcher._require_askpass_force_support("probe check")
+
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        _report("RESULT", f"probe cmd = {cmd}")
+        assert cmd[0] == "ssh"
+        assert "-G" in cmd
+        assert "-o" in cmd
+        assert "KnownHostsCommand=none" in cmd
+        _report("PASS", "Correct probe command")
+
+
+class TestLaunchTerminalEndToEndChecks:
+    """Verify checks fire during actual launch_terminal calls."""
+
+    @patch("linux_ssh_tools.terminal.subprocess.run")
+    @patch("linux_ssh_tools.terminal.subprocess.Popen")
+    @patch("linux_ssh_tools.terminal.shutil.which")
+    @patch("linux_ssh_tools.terminal._IS_WINDOWS", False)
+    @patch("linux_ssh_tools.terminal.SSHTerminalLauncher._has_sshpass", return_value=False)
+    def test_old_ssh_blocks_password_launch(
+        self, _mock_has, mock_which, mock_popen, mock_run,
+    ) -> None:
+        _report("TEST", "launch_terminal with password + old SSH fails hard")
+        from linux_ssh_tools.exceptions import TerminalLaunchError
+        mock_which.side_effect = lambda name: f"/usr/bin/{name}" if name in ("gnome-terminal", "ssh") else None
+        mock_run.return_value = MagicMock(returncode=255)  # Old SSH
+
+        lnch = _make_launcher(password="secret")
+        with pytest.raises(TerminalLaunchError) as exc_info:
+            lnch.launch_terminal(context="old ssh test")
+
+        msg = str(exc_info.value)
+        _report("RESULT", f"error = {msg}")
+        assert "OpenSSH 8.4" in msg
+        mock_popen.assert_not_called()
+        _report("PASS", "Old SSH blocks launch before Popen")
+
+    @patch("linux_ssh_tools.terminal.subprocess.run")
+    @patch("linux_ssh_tools.terminal.subprocess.Popen")
+    @patch("linux_ssh_tools.terminal.shutil.which")
+    @patch("linux_ssh_tools.terminal._IS_WINDOWS", True)
+    def test_old_ssh_blocks_windows_password_launch(
+        self, mock_which, mock_popen, mock_run,
+    ) -> None:
+        _report("TEST", "launch_terminal on Windows with old SSH fails hard")
+        from linux_ssh_tools.exceptions import TerminalLaunchError
+        mock_which.side_effect = lambda name: "C:\\ssh.exe" if name == "ssh" else None
+        mock_run.return_value = MagicMock(returncode=255)  # Old SSH
+
+        lnch = _make_launcher(password="secret")
+        with patch("subprocess.CREATE_NEW_CONSOLE", 0x10, create=True):
+            with pytest.raises(TerminalLaunchError) as exc_info:
+                lnch.launch_terminal(context="old ssh win")
+
+        msg = str(exc_info.value)
+        _report("RESULT", f"error = {msg}")
+        assert "OpenSSH 8.4" in msg
+        mock_popen.assert_not_called()
+        _report("PASS", "Old SSH on Windows blocks launch too")
+
+    @patch("linux_ssh_tools.terminal.subprocess.Popen")
+    @patch("linux_ssh_tools.terminal.shutil.which")
+    @patch("linux_ssh_tools.terminal._IS_WINDOWS", False)
+    @patch("linux_ssh_tools.terminal.SSHTerminalLauncher._has_sshpass", return_value=True)
+    def test_sshpass_skips_version_check(
+        self, _mock_has, mock_which, mock_popen,
+    ) -> None:
+        _report("TEST", "sshpass path does NOT run version probe")
+        mock_which.side_effect = lambda name: f"/usr/bin/{name}" if name in ("gnome-terminal", "ssh") else None
+        mock_popen.return_value = MagicMock()
+
+        lnch = _make_launcher(password="secret")
+        # If the probe ran, it would hit real ssh -G. Since we're not
+        # mocking subprocess.run, any call to it would be real. The test
+        # passing proves the probe was never called.
+        lnch.launch_terminal(context="sshpass skip")
+
+        mock_popen.assert_called_once()
+        _report("PASS", "No version probe when sshpass is used")
+
+    @patch("linux_ssh_tools.terminal.subprocess.Popen")
+    @patch("linux_ssh_tools.terminal.shutil.which")
+    @patch("linux_ssh_tools.terminal._IS_WINDOWS", False)
+    def test_empty_password_skips_all_checks(self, mock_which, mock_popen) -> None:
+        _report("TEST", "Empty password skips askpass check entirely")
+        mock_which.side_effect = lambda name: f"/usr/bin/{name}" if name in ("gnome-terminal", "ssh") else None
+        mock_popen.return_value = MagicMock()
+
+        lnch = _make_launcher(password="")
+        lnch.launch_terminal(context="empty pw")
+
+        mock_popen.assert_called_once()
+        _report("PASS", "No version probe for empty password")
 
 
 # ---------------------------------------------------------------------------

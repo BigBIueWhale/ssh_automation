@@ -119,6 +119,56 @@ class SSHTerminalLauncher:
         t.daemon = True
         t.start()
 
+    def _require_ssh_on_path(self, context: str) -> None:
+        """Raise `.TerminalLaunchError` if ``ssh`` is not on PATH."""
+        if not shutil.which("ssh"):
+            raise TerminalLaunchError(
+                f"[{context}] SSH client is not installed or not found on "
+                f"PATH. Cannot launch terminal session to "
+                f"{self.connection_manager.hostname}. Install OpenSSH and "
+                f"ensure 'ssh' is available in your system PATH."
+            )
+
+    def _require_askpass_force_support(self, context: str) -> None:
+        """Raise `.TerminalLaunchError` if SSH is too old for SSH_ASKPASS.
+
+        Probes by asking ``ssh -G`` to resolve a config that includes
+        ``KnownHostsCommand`` — a config keyword introduced in OpenSSH 8.5
+        (one minor release after 8.4 which added
+        ``SSH_ASKPASS_REQUIRE=force``).  No network connection is made;
+        ``-G`` just parses config and exits.
+        """
+        probe_cmd = ["ssh", "-G", "-o", "KnownHostsCommand=none", "_probe"]
+        probe_kwargs: dict = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "timeout": 5,
+        }
+        # Prevent a console window flash on Windows.
+        _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if _IS_WINDOWS and _CREATE_NO_WINDOW:
+            probe_kwargs["creationflags"] = _CREATE_NO_WINDOW
+
+        try:
+            result = subprocess.run(probe_cmd, **probe_kwargs)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise TerminalLaunchError(
+                f"[{context}] Cannot verify SSH feature support for "
+                f"{self.connection_manager.hostname}: {exc}"
+            ) from exc
+
+        if result.returncode != 0:
+            raise TerminalLaunchError(
+                f"[{context}] Password automation requires OpenSSH 8.4+ "
+                f"(which introduced SSH_ASKPASS_REQUIRE=force). The "
+                f"installed SSH client does not support this — it failed "
+                f"to recognize KnownHostsCommand, a config option from the "
+                f"same era. Upgrade OpenSSH, use key-based authentication "
+                f"(empty password), or on Linux install sshpass "
+                f"(apt install sshpass)."
+            )
+
     def _prepare_password_env(
         self,
     ) -> Tuple[List[str], Dict[str, str], Optional[str]]:
@@ -244,7 +294,12 @@ class SSHTerminalLauncher:
             TerminalLaunchError: If terminal launch fails
         """
         try:
+            self._require_ssh_on_path(context)
+
             ssh_prefix, password_env, askpass_path = self._prepare_password_env()
+
+            if askpass_path is not None:
+                self._require_askpass_force_support(context)
 
             if _IS_WINDOWS:
                 if use_windows_terminal and shutil.which("wt"):
