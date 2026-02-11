@@ -8,22 +8,23 @@ version = "0.1.0"
 description = "Robust SSH tools for Linux device management from Windows"
 authors = [{name = "Mistral Vibe", email = "vibe@mistral.ai"}]
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.7"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: Microsoft :: Windows",
 ]
 dependencies = [
     "paramiko>=2.12.0",
-    "typeguard>=4.0.0",
+    "typeguard>=2.13.0",
     "tqdm>=4.65.0",
+    "pyserial>=3.5",
 ]
 
 [project.scripts]
 linux-ssh = "linux_ssh_tools.cli:main"
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.7"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true

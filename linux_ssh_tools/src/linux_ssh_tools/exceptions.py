@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from .serial_comm import SerialCommandResult
@@ -83,7 +83,7 @@ class SerialTimeoutError(SerialCommunicationError):
         self,
         message: str,
         *,
-        result: SerialCommandResult | None = None,
+        result: Optional[SerialCommandResult] = None,
     ) -> None:
         super().__init__(message)
         self.result = result

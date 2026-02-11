@@ -21,7 +21,7 @@ import dataclasses
 import logging
 import platform
 import time
-from typing import Callable, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import serial
 import serial.tools.list_ports
@@ -265,7 +265,7 @@ class SerialConnectionManager:
     # ---- Helpers ----
 
     @staticmethod
-    def list_available_ports() -> list[str]:
+    def list_available_ports() -> List[str]:
         """Return a list of serial port names visible to the operating system.
 
         Useful for diagnostics when the caller is unsure which port to use.

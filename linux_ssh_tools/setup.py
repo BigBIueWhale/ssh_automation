@@ -26,13 +26,14 @@ setup(
     package_dir={"": "src"},
     install_requires=[
         "paramiko>=2.12.0",
-        "typeguard>=4.0.0",
+        "typeguard>=2.13.0",
         "tqdm>=4.65.0",
         "pyserial>=3.5",
     ],
-    python_requires=">=3.8",
+    python_requires=">=3.7",
     classifiers=[
         "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.7",
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
