@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import atexit
+import os
 import platform
 import shutil
+import stat
 import subprocess
+import tempfile
+import threading
 import time
-from typing import Optional, List, Union
+from typing import Dict, Optional, List, Tuple, Union
 
 from typeguard import typechecked
 
@@ -55,26 +60,120 @@ class SSHTerminalLauncher:
 
         return args
 
+    # ------------------------------------------------------------------
+    #  Password automation helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _has_sshpass() -> bool:
+        """Return True if sshpass is available on PATH."""
+        return shutil.which("sshpass") is not None
+
+    @staticmethod
+    def _create_askpass_script(password: str) -> str:
+        """Write a temporary script that echoes *password* for SSH_ASKPASS.
+
+        On Linux the script is a POSIX shell script (mode 0700).
+        On Windows the script is a ``.bat`` file.
+        Returns the absolute path to the created file.
+        """
+        if _IS_WINDOWS:
+            # Escape cmd.exe metacharacters so the password is literal.
+            safe = password
+            for ch in "^&|<>()":
+                safe = safe.replace(ch, f"^{ch}")
+            content = f"@echo off\necho {safe}\n"
+            suffix = ".bat"
+        else:
+            # Single-quote the password; escape embedded single quotes.
+            safe = password.replace("'", "'\\''")
+            content = f"#!/bin/sh\necho '{safe}'\n"
+            suffix = ".sh"
+
+        fd, path = tempfile.mkstemp(suffix=suffix, prefix="ssh_askpass_")
+        try:
+            os.write(fd, content.encode())
+        finally:
+            os.close(fd)
+
+        if not _IS_WINDOWS:
+            os.chmod(path, stat.S_IRWXU)  # 0700
+
+        # Safety net: delete when the interpreter exits if still present.
+        atexit.register(lambda p=path: os.unlink(p) if os.path.exists(p) else None)
+
+        return path
+
+    def _schedule_askpass_cleanup(self, path: str, delay: float = 5.0) -> None:
+        """Delete the askpass script after *delay* seconds.
+
+        Uses a daemon thread so it won't prevent interpreter shutdown.
+        """
+        def _cleanup() -> None:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+        t = threading.Timer(delay, _cleanup)
+        t.daemon = True
+        t.start()
+
+    def _prepare_password_env(
+        self,
+    ) -> Tuple[List[str], Dict[str, str], Optional[str]]:
+        """Choose a password-delivery strategy.
+
+        Returns ``(ssh_prefix, env_vars, askpass_path)``:
+
+        * *ssh_prefix*  — extra tokens to prepend before ``ssh`` (e.g.
+          ``["sshpass", "-e"]``).
+        * *env_vars*    — environment variables to merge into the child
+          process environment.
+        * *askpass_path* — path to a temporary askpass script that should
+          be cleaned up after launch, or ``None``.
+        """
+        password = self.connection_manager.password
+        if not password:
+            return [], {}, None
+
+        # Preferred: sshpass on Linux
+        if not _IS_WINDOWS and self._has_sshpass():
+            return ["sshpass", "-e"], {"SSHPASS": password}, None
+
+        # Fallback: SSH_ASKPASS
+        askpass_path = self._create_askpass_script(password)
+        env: Dict[str, str] = {
+            "SSH_ASKPASS": askpass_path,
+            "SSH_ASKPASS_REQUIRE": "force",
+        }
+        if not _IS_WINDOWS:
+            env.setdefault("DISPLAY", os.environ.get("DISPLAY", ":0"))
+        return [], env, askpass_path
+
     def _get_windows_terminal_command(
         self,
         initial_command: Optional[str] = None,
         window_title: Optional[str] = None,
+        ssh_prefix: Optional[List[str]] = None,
     ) -> List[str]:
         """Get command to launch Windows Terminal with SSH."""
         hostname = self.connection_manager.hostname
         ssh_args = self._build_ssh_args(initial_command)
+        prefix = ssh_prefix or []
 
         return [
             "wt",
             "-w", "0",
             "--title", window_title or f"SSH: {hostname}",
-            "--", *ssh_args,
+            "--", *prefix, *ssh_args,
         ]
 
     def _get_cmd_terminal_command(
         self,
         initial_command: Optional[str] = None,
         window_title: Optional[str] = None,
+        ssh_prefix: Optional[List[str]] = None,
     ) -> str:
         """Get command to launch CMD terminal with SSH.
 
@@ -86,6 +185,7 @@ class SSHTerminalLauncher:
         """
         hostname = self.connection_manager.hostname
         ssh_args = self._build_ssh_args(initial_command)
+        prefix = ssh_prefix or []
 
         title = window_title or f"SSH: {hostname}"
         # Escape cmd.exe metacharacters in the title so they are literal.
@@ -94,31 +194,33 @@ class SSHTerminalLauncher:
             safe_title = safe_title.replace(ch, f"^{ch}")
 
         # list2cmdline produces correct Windows quoting for each ssh arg.
-        ssh_cmd = subprocess.list2cmdline(ssh_args)
+        ssh_cmd = subprocess.list2cmdline([*prefix, *ssh_args])
         return f"cmd /k title {safe_title}& {ssh_cmd}"
 
     def _get_linux_terminal_command(
         self,
         initial_command: Optional[str] = None,
         window_title: Optional[str] = None,
+        ssh_prefix: Optional[List[str]] = None,
     ) -> List[str]:
         """Get command to launch a Linux terminal emulator with SSH."""
         ssh_args = self._build_ssh_args(initial_command)
         hostname = self.connection_manager.hostname
         title = window_title or f"SSH: {hostname}"
+        prefix = ssh_prefix or []
 
         # Try common terminal emulators in order of preference
         for term in ("x-terminal-emulator", "gnome-terminal", "xterm"):
             if shutil.which(term):
                 if term == "gnome-terminal":
-                    return [term, "--title", title, "--", *ssh_args]
+                    return [term, "--title", title, "--", *prefix, *ssh_args]
                 if term == "xterm":
-                    return [term, "-T", title, "-e", *ssh_args]
+                    return [term, "-T", title, "-e", *prefix, *ssh_args]
                 # x-terminal-emulator (Debian/Ubuntu default)
-                return [term, "-e", *ssh_args]
+                return [term, "-e", *prefix, *ssh_args]
 
         # Fallback: just run ssh directly (no new window)
-        return ssh_args
+        return [*prefix, *ssh_args]
 
     def launch_terminal(
         self,
@@ -142,19 +244,36 @@ class SSHTerminalLauncher:
             TerminalLaunchError: If terminal launch fails
         """
         try:
+            ssh_prefix, password_env, askpass_path = self._prepare_password_env()
+
             if _IS_WINDOWS:
                 if use_windows_terminal and shutil.which("wt"):
-                    cmd = self._get_windows_terminal_command(initial_command, window_title)
+                    cmd = self._get_windows_terminal_command(
+                        initial_command, window_title, ssh_prefix=ssh_prefix,
+                    )
                 else:
-                    cmd = self._get_cmd_terminal_command(initial_command, window_title)
+                    cmd = self._get_cmd_terminal_command(
+                        initial_command, window_title, ssh_prefix=ssh_prefix,
+                    )
             else:
-                cmd = self._get_linux_terminal_command(initial_command, window_title)
+                cmd = self._get_linux_terminal_command(
+                    initial_command, window_title, ssh_prefix=ssh_prefix,
+                )
 
-            kwargs = {}
+            kwargs: dict = {}
             if _IS_WINDOWS:
                 kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
 
+            if password_env:
+                env = os.environ.copy()
+                env.update(password_env)
+                kwargs["env"] = env
+
             process = subprocess.Popen(cmd, **kwargs)  # type: ignore[call-overload]
+
+            if askpass_path:
+                self._schedule_askpass_cleanup(askpass_path)
+
             return process
 
         except Exception as e:
