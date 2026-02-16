@@ -14,8 +14,11 @@ All operations bypass SSH fingerprint verification for stateless hardware device
 on internal networks, with full error reporting and validation.
 """
 
+import logging
 import os
 from typing import List
+
+logging.getLogger("linux_ssh_tools").addHandler(logging.NullHandler())
 
 __version__ = "0.1.0"
 
@@ -52,7 +55,8 @@ SERIAL_BAUD_RATE = 115200
 SERIAL_BYTESIZE = 8       # 8 data bits
 SERIAL_PARITY = "N"       # No parity
 SERIAL_STOPBITS = 1       # 1 stop bit
-SERIAL_READ_TIMEOUT = 0.1  # seconds — internal polling granularity, NOT the user-facing duration
+SERIAL_READ_TIMEOUT = 0  # seconds — non-blocking; timing managed by the poll loop, not the driver
+SERIAL_WRITE_TIMEOUT = 10  # seconds — blocking with failsafe; prevents infinite hangs
 SERIAL_DEFAULT_DURATION_MS = 2000  # default read duration in milliseconds
 SERIAL_COMMAND_TIMEOUT_MS = 30000  # default serial command execution timeout
 SERIAL_PROMPT_SETTLE_MS = 200     # pause after wake-up ENTER before sending command

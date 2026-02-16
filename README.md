@@ -346,9 +346,56 @@ with SerialConnectionManager("/dev/ttyUSB0") as serial_mgr:
     print(f"Modem response: {response!r}")
 ```
 
+Custom serial port settings (defaults: 115200 8N1, no flow control):
+
+```python
+from linux_ssh_tools.serial_comm import SerialConnectionManager, SerialReader
+
+# Custom serial settings (defaults: 115200 8N1, write_timeout=10)
+with SerialConnectionManager(
+    "/dev/ttyUSB0",
+    baud_rate=9600,
+    bytesize=7,
+    parity="E",
+    stopbits=2,
+    write_timeout=10,
+) as serial_mgr:
+    reader = SerialReader(serial_mgr)
+    data = reader.flush_and_read(context="custom settings read", duration_ms=2000)
+    print(data)
+```
+
 ---
 
-### 6. Serial: execute a command over the serial console
+### 6. Serial: read until a condition is met
+
+Read from the serial port until a pattern appears or the timeout expires,
+without sending any command. Useful for waiting on asynchronous device output.
+
+```python
+from linux_ssh_tools.serial_comm import SerialConnectionManager, SerialReader
+
+with SerialConnectionManager("/dev/ttyUSB0") as serial_mgr:
+    reader = SerialReader(serial_mgr)
+
+    # Wait until "ready" appears (or 10s timeout)
+    text, nbytes, elapsed, matched = reader.read_until(
+        "ready",
+        context="wait for boot",
+        timeout_ms=10000,
+    )
+
+    # With a callable condition
+    text, nbytes, elapsed, matched = reader.read_until(
+        lambda text: "login:" in text or "# " in text,
+        context="wait for prompt",
+        timeout_ms=30000,
+    )
+```
+
+---
+
+### 7. Serial: execute a command over the serial console
 
 Sends ENTER (wake-up) → flushes → sends the command + ENTER → blocks while
 reading the response.  Stopping is **not** based on timeout alone — you
@@ -470,7 +517,7 @@ with SerialConnectionManager("/dev/ttyUSB0") as serial_mgr:
 
 ---
 
-### 7. Error handling
+### 8. Error handling
 
 Every exception inherits from `LinuxSSHToolsError`, so you can catch
 everything with a single base class or be specific:
@@ -514,7 +561,7 @@ is embedded into all error messages as `[context]` so you always know
 
 ---
 
-### 8. List available serial ports
+### 9. List available serial ports
 
 ```python
 from linux_ssh_tools.serial_comm import SerialConnectionManager
@@ -548,6 +595,11 @@ linux-ssh serial-read --duration 3000 --serial-port /dev/ttyUSB0
 
 # Execute a command over serial, stop when prompt appears
 linux-ssh serial-exec "ls /" --stop-on "# " --stream --timeout 10000
+
+# Serial with custom line settings
+linux-ssh serial-read --serial-port /dev/ttyUSB0 --baud-rate 9600 --parity E
+linux-ssh serial-exec "AT" --serial-port COM3 --bytesize 7 --stopbits 2
+linux-ssh serial-exec "AT" --serial-port COM3 --write-timeout 5
 
 # List serial ports
 linux-ssh serial-list

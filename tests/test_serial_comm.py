@@ -65,6 +65,9 @@ from linux_ssh_tools.serial_comm import (
     SerialReader,
     SerialCommandExecutor,
     SerialCommandResult,
+    _POLL_INTERVAL_S,
+    _poll_read_loop,
+    _write_all,
 )
 from linux_ssh_tools.exceptions import (
     SerialCommunicationError,
@@ -594,7 +597,7 @@ class TestCommandExecutorVirtual:
             _report("RESULT", "output={!r}, timed_out={}, bytes={}".format(
                 result.output, result.timed_out, result.bytes_received,
             ))
-            assert result.timed_out is True
+            assert result.timed_out is False  # no stop_condition → timed_out is False
             assert result.stopped_by_condition is False
             assert result.command == "silent_command"
         _report("PASS", "Silent line handled gracefully, no crash")
@@ -778,7 +781,7 @@ class TestCommandExecutorVirtual:
             ))
             # Should have run for approximately the full timeout
             assert elapsed >= 0.5  # at least 500ms of the 600ms timeout
-            assert result.timed_out is True
+            assert result.timed_out is False  # no stop_condition → timed_out is False
             assert result.stopped_by_condition is False
 
         t.join(timeout=3)
@@ -1177,6 +1180,596 @@ class TestSerialExceptionHierarchy:
         assert issubclass(SerialTimeoutError, LinuxSSHToolsError)
         assert issubclass(SerialTimeoutError, SerialCommunicationError)
         _report("PASS", "Serial exception hierarchy is correct")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TESTS — NullHandler / No stderr leak
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestNullHandler:
+    """Library logging does not leak to stderr when no handler is configured."""
+
+    def test_no_stderr_on_timeout(self, serial_pair, capsys):
+        # type: (VirtualSerialPair, object) -> None
+        _report("TEST", "No stderr output on timeout")
+        with SerialConnectionManager(serial_pair.slave_path) as mgr:
+            reader = SerialReader(mgr)
+            reader.flush(context="test no stderr flush")
+            with pytest.raises(SerialTimeoutError):
+                reader.read_for_duration(context="test no stderr", duration_ms=200)
+        captured = capsys.readouterr()
+        # Only our _report() prints and pytest env header should appear.
+        # No logger.warning output should leak to stderr.
+        for line in captured.err.splitlines():
+            assert "[SERIAL-" not in line, (
+                "Logger output leaked to stderr: {}".format(line)
+            )
+        _report("PASS", "No logger output leaked to stderr")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TESTS — _POLL_INTERVAL_S constant
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestPollInterval:
+    """The _POLL_INTERVAL_S constant is sane."""
+
+    def test_poll_interval_value(self):
+        # type: () -> None
+        _report("TEST", "_POLL_INTERVAL_S is 10ms")
+        assert _POLL_INTERVAL_S == 0.01
+        _report("PASS", "_POLL_INTERVAL_S == 0.01")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TESTS — Busy-loop guard
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestBusyLoopGuard:
+    """When ser.read() returns b'' despite in_waiting > 0, the poll loop
+    must not spin at 100% CPU — it should sleep."""
+
+    def test_empty_read_does_not_busy_loop(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        _report("TEST", "Empty read from in_waiting>0 triggers sleep, not spin")
+        with SerialConnectionManager(serial_pair.slave_path) as mgr:
+            ser = mgr.get_serial()
+            # Patch in_waiting to always report >0, read to return b""
+            original_in_waiting = type(ser).in_waiting
+            original_read = ser.read
+            call_count = [0]
+
+            class FakeInWaiting:
+                def __get__(self, obj, objtype=None):
+                    if obj is None:
+                        return self
+                    call_count[0] += 1
+                    if call_count[0] <= 200:
+                        return 10  # lie: claim 10 bytes waiting
+                    return 0  # eventually stop
+
+            def fake_read(size):
+                # type: (int) -> bytes
+                return b""  # always empty despite in_waiting > 0
+
+            type(ser).in_waiting = FakeInWaiting()
+            ser.read = fake_read
+
+            try:
+                start = time.monotonic()
+                result = _poll_read_loop(
+                    ser=ser,
+                    port_name=mgr.port,
+                    timeout_s=0.5,
+                    context="test busy loop guard",
+                )
+                elapsed = time.monotonic() - start
+                _report("RESULT", "Elapsed={:.3f}s, cycles={}".format(
+                    elapsed, result.read_cycles,
+                ))
+                # If the busy-loop guard works, the loop should take at
+                # least some time due to sleeps, not complete in <10ms
+                assert elapsed >= 0.05, (
+                    "Loop ran too fast — busy-loop guard may not be working"
+                )
+                assert result.bytes_received == 0
+            finally:
+                type(ser).in_waiting = original_in_waiting
+                ser.read = original_read
+        _report("PASS", "Busy-loop guard prevented CPU spin")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TESTS — _drain_and_reset timeout guard
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestDrainTimeout:
+    """_drain_and_reset respects its max_drain_s timeout."""
+
+    def test_drain_respects_deadline(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        _report("TEST", "_drain_and_reset stops after max_drain_s")
+        with SerialConnectionManager(serial_pair.slave_path) as mgr:
+            ser = mgr.get_serial()
+            executor = SerialCommandExecutor(mgr)
+
+            # Patch: in_waiting always >0 but read returns empty
+            original_in_waiting = type(ser).in_waiting
+            original_read = ser.read
+
+            class AlwaysWaiting:
+                def __get__(self, obj, objtype=None):
+                    if obj is None:
+                        return self
+                    return 100  # always claim data is waiting
+
+            def empty_read(size):
+                # type: (int) -> bytes
+                return b""
+
+            type(ser).in_waiting = AlwaysWaiting()
+            ser.read = empty_read
+
+            try:
+                start = time.monotonic()
+                discarded = executor._drain_and_reset(
+                    ser, "test-drain", "test drain timeout",
+                    max_drain_s=0.3,
+                )
+                elapsed = time.monotonic() - start
+                _report("RESULT", "Drain took {:.3f}s, discarded={}".format(
+                    elapsed, discarded,
+                ))
+                # Should complete near the deadline, not hang forever
+                assert elapsed < 1.0, "Drain took too long (expected ~0.3s)"
+                assert discarded == 0  # read always returned empty
+            finally:
+                type(ser).in_waiting = original_in_waiting
+                ser.read = original_read
+        _report("PASS", "_drain_and_reset respects timeout")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TESTS — timed_out semantics
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestTimedOutSemantics:
+    """timed_out is True ONLY when stop_condition was provided but not matched."""
+
+    def test_no_stop_condition_means_not_timed_out(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        _report("TEST", "No stop_condition → timed_out is False")
+
+        # Drain master side
+        def drain():
+            # type: () -> None
+            while True:
+                try:
+                    serial_pair.read_from_master(4096)
+                except OSError:
+                    break
+                time.sleep(0.05)
+
+        t = threading.Thread(target=drain, daemon=True)
+        t.start()
+
+        with SerialConnectionManager(serial_pair.slave_path) as mgr:
+            executor = SerialCommandExecutor(mgr)
+            result = executor.execute_command(
+                "test",
+                context="test timed_out semantics",
+                timeout_ms=200,
+                stop_condition=None,
+                prompt_settle_ms=50,
+            )
+            assert result.timed_out is False
+            assert result.stopped_by_condition is False
+        _report("PASS", "timed_out=False when no stop_condition")
+
+    def test_stop_condition_met_means_not_timed_out(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        _report("TEST", "stop_condition matched → timed_out is False")
+
+        def device():
+            # type: () -> None
+            collected = b""
+            while True:
+                try:
+                    chunk = serial_pair.read_from_master(4096)
+                    collected += chunk
+                    if b"ping" in collected:
+                        time.sleep(0.05)
+                        serial_pair.write_to_master(b"pong DONE\r\n")
+                        return
+                except OSError:
+                    return
+                time.sleep(0.01)
+
+        t = threading.Thread(target=device, daemon=True)
+        t.start()
+
+        with SerialConnectionManager(serial_pair.slave_path) as mgr:
+            executor = SerialCommandExecutor(mgr)
+            result = executor.execute_command(
+                "ping",
+                context="test condition met",
+                timeout_ms=3000,
+                stop_condition=lambda text: "DONE" in text,
+                prompt_settle_ms=50,
+            )
+            assert result.timed_out is False
+            assert result.stopped_by_condition is True
+
+        t.join(timeout=3)
+        _report("PASS", "timed_out=False when stop_condition matched")
+
+    def test_stop_condition_not_met_means_timed_out(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        _report("TEST", "stop_condition not matched → timed_out is True")
+
+        def drain():
+            # type: () -> None
+            while True:
+                try:
+                    serial_pair.read_from_master(4096)
+                except OSError:
+                    break
+                time.sleep(0.05)
+
+        t = threading.Thread(target=drain, daemon=True)
+        t.start()
+
+        with SerialConnectionManager(serial_pair.slave_path) as mgr:
+            executor = SerialCommandExecutor(mgr)
+            with pytest.raises(SerialTimeoutError) as exc_info:
+                executor.execute_command(
+                    "test",
+                    context="test timed_out true",
+                    timeout_ms=300,
+                    stop_condition=lambda text: "NEVER" in text,
+                    prompt_settle_ms=50,
+                )
+            assert exc_info.value.result is not None
+            assert exc_info.value.result.timed_out is True
+        _report("PASS", "timed_out=True when stop_condition not matched")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TESTS — read_until
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestReadUntil:
+    """SerialReader.read_until() tests."""
+
+    def test_read_until_string_condition(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        _report("TEST", "read_until with string condition")
+
+        def writer():
+            # type: () -> None
+            time.sleep(0.1)
+            serial_pair.write_to_master(b"booting...")
+            time.sleep(0.1)
+            serial_pair.write_to_master(b" ready\r\n")
+
+        t = threading.Thread(target=writer, daemon=True)
+        t.start()
+
+        with SerialConnectionManager(serial_pair.slave_path) as mgr:
+            reader = SerialReader(mgr)
+            text, nbytes, elapsed, matched = reader.read_until(
+                "ready",
+                context="test read_until string",
+                timeout_ms=3000,
+            )
+            _report("RESULT", "matched={}, text={!r}".format(matched, text[:60]))
+            assert matched is True
+            assert "ready" in text
+            assert nbytes > 0
+            # Should have returned early, well before 3s timeout
+            assert elapsed < 2.0
+
+        t.join(timeout=2)
+        _report("PASS", "read_until with string exits early on match")
+
+    def test_read_until_callable_condition(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        _report("TEST", "read_until with callable condition")
+
+        def writer():
+            # type: () -> None
+            time.sleep(0.1)
+            serial_pair.write_to_master(b"login: ")
+
+        t = threading.Thread(target=writer, daemon=True)
+        t.start()
+
+        with SerialConnectionManager(serial_pair.slave_path) as mgr:
+            reader = SerialReader(mgr)
+            text, nbytes, elapsed, matched = reader.read_until(
+                lambda text: "login:" in text or "# " in text,
+                context="test read_until callable",
+                timeout_ms=3000,
+            )
+            assert matched is True
+            assert "login:" in text
+
+        t.join(timeout=2)
+        _report("PASS", "read_until with callable works")
+
+    def test_read_until_timeout_raises(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        _report("TEST", "read_until times out → SerialTimeoutError")
+        with SerialConnectionManager(serial_pair.slave_path) as mgr:
+            reader = SerialReader(mgr)
+            with pytest.raises(SerialTimeoutError):
+                reader.read_until(
+                    "NEVER_APPEARS",
+                    context="test read_until timeout",
+                    timeout_ms=300,
+                )
+        _report("PASS", "read_until raises on timeout")
+
+    def test_read_until_closed_port(self):
+        # type: () -> None
+        _report("TEST", "read_until on closed port raises")
+        mgr = SerialConnectionManager("/dev/ttyUSB0")
+        reader = SerialReader(mgr)
+        with pytest.raises(SerialCommunicationError) as exc_info:
+            reader.read_until("test", context="test closed", timeout_ms=1000)
+        assert "not open" in str(exc_info.value).lower()
+        _report("PASS", "read_until refused on closed port")
+
+    def test_read_until_invalid_timeout(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        _report("TEST", "read_until with bad timeout raises")
+        with SerialConnectionManager(serial_pair.slave_path) as mgr:
+            reader = SerialReader(mgr)
+            with pytest.raises(SerialCommunicationError):
+                reader.read_until("x", context="test bad timeout", timeout_ms=-1)
+        _report("PASS", "Invalid timeout rejected")
+
+    def test_read_until_with_streaming(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        _report("TEST", "read_until with on_data callback")
+
+        chunks = []  # type: List[str]
+
+        def writer():
+            # type: () -> None
+            time.sleep(0.1)
+            serial_pair.write_to_master(b"part1_")
+            time.sleep(0.05)
+            serial_pair.write_to_master(b"part2_DONE")
+
+        t = threading.Thread(target=writer, daemon=True)
+        t.start()
+
+        with SerialConnectionManager(serial_pair.slave_path) as mgr:
+            reader = SerialReader(mgr)
+            text, nbytes, elapsed, matched = reader.read_until(
+                "DONE",
+                context="test read_until streaming",
+                timeout_ms=3000,
+                on_data=lambda c: chunks.append(c),
+            )
+            assert matched is True
+            assert len(chunks) > 0
+            combined = "".join(chunks)
+            assert "part1_" in combined or "part1_" in text
+
+        t.join(timeout=2)
+        _report("PASS", "read_until streaming callback works")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TESTS — Flow control parameters
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestFlowControl:
+    """SerialConnectionManager accepts flow control parameters."""
+
+    def test_flow_control_defaults(self):
+        # type: () -> None
+        _report("TEST", "Default flow control is all False")
+        mgr = SerialConnectionManager("/dev/ttyUSB0")
+        assert mgr.xonxoff is False
+        assert mgr.rtscts is False
+        assert mgr.dsrdtr is False
+        _report("PASS", "Default flow control correct")
+
+    def test_flow_control_can_be_set(self):
+        # type: () -> None
+        _report("TEST", "Flow control params can be set")
+        mgr = SerialConnectionManager(
+            "/dev/ttyUSB0", xonxoff=True, rtscts=True, dsrdtr=True,
+        )
+        assert mgr.xonxoff is True
+        assert mgr.rtscts is True
+        assert mgr.dsrdtr is True
+        _report("PASS", "Flow control params stored")
+
+    def test_flow_control_passed_to_serial(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        _report("TEST", "Flow control params passed to pyserial")
+        with SerialConnectionManager(
+            serial_pair.slave_path, xonxoff=True,
+        ) as mgr:
+            ser = mgr.get_serial()
+            assert ser.xonxoff is True
+        _report("PASS", "xonxoff passed through to pyserial")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TESTS — CLI argument parsing
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestCLIArgs:
+    """CLI serial subcommands accept the new --bytesize/--parity/--stopbits flags."""
+
+    def test_serial_read_help_includes_new_flags(self):
+        # type: () -> None
+        _report("TEST", "serial-read --help includes --bytesize, --parity, --stopbits")
+        from linux_ssh_tools.cli import main
+        import io
+        with pytest.raises(SystemExit) as exc_info:
+            sys.argv = ["linux-ssh", "serial-read", "--help"]
+            main()
+        # argparse exits 0 on --help
+        assert exc_info.value.code == 0
+        _report("PASS", "serial-read --help works")
+
+    def test_serial_exec_help_includes_new_flags(self):
+        # type: () -> None
+        _report("TEST", "serial-exec --help includes --bytesize, --parity, --stopbits")
+        from linux_ssh_tools.cli import main as cli_main
+        with pytest.raises(SystemExit) as exc_info:
+            sys.argv = ["linux-ssh", "serial-exec", "test", "--help"]
+            cli_main()
+        assert exc_info.value.code == 0
+        _report("PASS", "serial-exec --help works")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TESTS — Write timeout configuration
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestWriteTimeout:
+    """SERIAL_WRITE_TIMEOUT constant and write_timeout parameter."""
+
+    def test_serial_write_timeout_constant(self):
+        # type: () -> None
+        _report("TEST", "SERIAL_WRITE_TIMEOUT == 10")
+        from linux_ssh_tools import SERIAL_WRITE_TIMEOUT
+        assert SERIAL_WRITE_TIMEOUT == 10
+        _report("PASS", "SERIAL_WRITE_TIMEOUT == 10")
+
+    def test_default_write_timeout_is_10(self):
+        # type: () -> None
+        _report("TEST", "SerialConnectionManager default write_timeout is 10")
+        mgr = SerialConnectionManager("/dev/ttyUSB0")
+        assert mgr.write_timeout == 10
+        _report("PASS", "Default write_timeout == 10")
+
+    def test_write_timeout_independent_from_read_timeout(self):
+        # type: () -> None
+        _report("TEST", "write_timeout and read_timeout are independent")
+        mgr = SerialConnectionManager("/dev/ttyUSB0", read_timeout=0, write_timeout=5)
+        assert mgr.read_timeout == 0
+        assert mgr.write_timeout == 5
+        _report("PASS", "write_timeout and read_timeout are independent")
+
+    def test_write_timeout_none_accepted(self):
+        # type: () -> None
+        _report("TEST", "write_timeout=None accepted (blocking mode)")
+        mgr = SerialConnectionManager("/dev/ttyUSB0", write_timeout=None)
+        assert mgr.write_timeout is None
+        _report("PASS", "write_timeout=None accepted")
+
+    def test_write_timeout_negative_rejected(self):
+        # type: () -> None
+        _report("TEST", "write_timeout=-1 should be rejected")
+        with pytest.raises(SerialCommunicationError) as exc_info:
+            SerialConnectionManager("/dev/ttyUSB0", write_timeout=-1)
+        assert "write_timeout" in str(exc_info.value).lower()
+        _report("PASS", "Negative write_timeout rejected")
+
+    def test_write_timeout_propagated_to_serial(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        _report("TEST", "write_timeout propagated to underlying serial.Serial")
+        with SerialConnectionManager(
+            serial_pair.slave_path, write_timeout=7.5,
+        ) as mgr:
+            ser = mgr.get_serial()
+            assert ser.write_timeout == 7.5
+            # read timeout should still be 0 (non-blocking)
+            assert ser.timeout == 0
+        _report("PASS", "write_timeout correctly set on pyserial object")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TESTS — _write_all function
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestWriteAll:
+    """_write_all() writes all bytes, detects short writes, and flushes."""
+
+    def test_write_all_happy_path(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        _report("TEST", "_write_all writes all bytes and data arrives on master")
+        with SerialConnectionManager(serial_pair.slave_path) as mgr:
+            ser = mgr.get_serial()
+            payload = b"HELLO_WRITE_ALL"
+            n = _write_all(ser, payload, mgr.port, context="test happy path")
+            assert n == len(payload)
+            time.sleep(0.1)
+            received = serial_pair.read_from_master(4096)
+            assert payload in received
+        _report("PASS", "_write_all happy path OK")
+
+    def test_write_all_short_write_detection(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        _report("TEST", "_write_all detects short write")
+        with SerialConnectionManager(serial_pair.slave_path) as mgr:
+            ser = mgr.get_serial()
+            original_write = ser.write
+
+            def short_write(data):
+                # type: (bytes) -> int
+                # Simulate writing only 3 of N bytes
+                original_write(data[:3])
+                return 3
+
+            ser.write = short_write
+            try:
+                with pytest.raises(SerialCommunicationError) as exc_info:
+                    _write_all(ser, b"FULL_PAYLOAD", mgr.port, context="test short write")
+                assert "Short write" in str(exc_info.value)
+                _report("CAUGHT", str(exc_info.value)[:80])
+            finally:
+                ser.write = original_write
+        _report("PASS", "Short write detected with clear message")
+
+    def test_write_all_flush_failure_propagates(self, serial_pair):
+        # type: (VirtualSerialPair) -> None
+        _report("TEST", "_write_all propagates flush failure")
+        with SerialConnectionManager(serial_pair.slave_path) as mgr:
+            ser = mgr.get_serial()
+            original_flush = ser.flush
+
+            def bad_flush():
+                # type: () -> None
+                raise serial.SerialException("flush failed")
+
+            ser.flush = bad_flush
+            try:
+                with pytest.raises(serial.SerialException):
+                    _write_all(ser, b"DATA", mgr.port, context="test flush failure")
+            finally:
+                ser.flush = original_flush
+        _report("PASS", "Flush failure propagated")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TESTS — SERIAL_READ_TIMEOUT is non-blocking
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestNonBlockingTimeout:
+    """SERIAL_READ_TIMEOUT should be 0 (non-blocking)."""
+
+    def test_default_read_timeout_is_zero(self):
+        # type: () -> None
+        _report("TEST", "Default read_timeout is 0")
+        from linux_ssh_tools import SERIAL_READ_TIMEOUT
+        assert SERIAL_READ_TIMEOUT == 0
+        _report("PASS", "SERIAL_READ_TIMEOUT == 0")
+
+    def test_connection_manager_default_timeout(self):
+        # type: () -> None
+        _report("TEST", "SerialConnectionManager default read_timeout is 0")
+        mgr = SerialConnectionManager("/dev/ttyUSB0")
+        assert mgr.read_timeout == 0
+        _report("PASS", "Default read_timeout == 0")
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,52 @@ def create_connection_manager(device_index: int = 0, port: int = 22) -> SSHConne
     )
 
 
+def _add_serial_port_args(parser: argparse.ArgumentParser) -> None:
+    """Add common serial port arguments to a subparser."""
+    parser.add_argument(
+        "--baud-rate", type=int, default=115200,
+        help="Baud rate (default: 115200)",
+    )
+    parser.add_argument(
+        "--bytesize", type=int, default=8, choices=[5, 6, 7, 8],
+        help="Number of data bits (default: 8)",
+    )
+    parser.add_argument(
+        "--parity", type=str, default="N", choices=["N", "E", "O", "M", "S"],
+        help="Parity: N(one), E(ven), O(dd), M(ark), S(pace) (default: N)",
+    )
+    parser.add_argument(
+        "--stopbits", type=int, default=1, choices=[1, 2],
+        help="Number of stop bits (default: 1)",
+    )
+    parser.add_argument(
+        "--serial-port", type=str, default=None,
+        help="Serial port path (e.g. /dev/ttyUSB0 or COM3). "
+             "Overrides the device config.",
+    )
+    parser.add_argument(
+        "--line", type=int, default=1, choices=[1, 2],
+        help="Serial line number per device (1 or 2, default: 1)",
+    )
+    parser.add_argument(
+        "--write-timeout", type=float, default=10.0,
+        help="Write timeout in seconds (default: 10). Use 0 for non-blocking.",
+    )
+
+
+def _create_serial_manager(args, port: str) -> SerialConnectionManager:
+    """Create a SerialConnectionManager from parsed CLI args."""
+    write_timeout = args.write_timeout if args.write_timeout >= 0 else None
+    return SerialConnectionManager(
+        port=port,
+        baud_rate=args.baud_rate,
+        bytesize=args.bytesize,
+        parity=args.parity,
+        stopbits=args.stopbits,
+        write_timeout=write_timeout,
+    )
+
+
 def command_execute(args) -> int:
     """Execute command on remote device."""
     connection_manager = create_connection_manager(args.device, args.port)
@@ -127,10 +173,7 @@ def command_serial_read(args) -> int:
     ctx = f"CLI serial-read on {port}"
 
     try:
-        with SerialConnectionManager(
-            port=port,
-            baud_rate=args.baud_rate,
-        ) as mgr:
+        with _create_serial_manager(args, port) as mgr:
             reader = SerialReader(mgr)
             data = reader.flush_and_read(context=ctx, duration_ms=args.duration)
 
@@ -166,10 +209,7 @@ def command_serial_exec(args) -> int:
     ctx = f"CLI serial-exec on {port}"
 
     try:
-        with SerialConnectionManager(
-            port=port,
-            baud_rate=args.baud_rate,
-        ) as mgr:
+        with _create_serial_manager(args, port) as mgr:
             executor = SerialCommandExecutor(mgr)
             result = executor.execute_command(
                 command=args.serial_command,
@@ -289,19 +329,7 @@ def main() -> int:
         "--duration", type=int, default=2000,
         help="Read duration in milliseconds (default: 2000)",
     )
-    serial_parser.add_argument(
-        "--baud-rate", type=int, default=115200,
-        help="Baud rate (default: 115200)",
-    )
-    serial_parser.add_argument(
-        "--serial-port", type=str, default=None,
-        help="Serial port path (e.g. /dev/ttyUSB0 or COM3). "
-             "Overrides the device config.",
-    )
-    serial_parser.add_argument(
-        "--line", type=int, default=1, choices=[1, 2],
-        help="Serial line number per device (1 or 2, default: 1)",
-    )
+    _add_serial_port_args(serial_parser)
     serial_parser.set_defaults(func=command_serial_read)
 
     # Serial exec
@@ -326,19 +354,7 @@ def main() -> int:
         "--stream", action="store_true", default=False,
         help="Stream output to stdout as it arrives",
     )
-    serial_exec_parser.add_argument(
-        "--baud-rate", type=int, default=115200,
-        help="Baud rate (default: 115200)",
-    )
-    serial_exec_parser.add_argument(
-        "--serial-port", type=str, default=None,
-        help="Serial port path (e.g. /dev/ttyUSB0 or COM3). "
-             "Overrides the device config.",
-    )
-    serial_exec_parser.add_argument(
-        "--line", type=int, default=1, choices=[1, 2],
-        help="Serial line number per device (1 or 2, default: 1)",
-    )
+    _add_serial_port_args(serial_exec_parser)
     serial_exec_parser.set_defaults(func=command_serial_exec)
 
     # Serial list
