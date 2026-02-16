@@ -544,7 +544,10 @@ class TestCommandExecutorClosedPort:
         mgr = SerialConnectionManager("/dev/ttyUSB0")
         executor = SerialCommandExecutor(mgr)
         with pytest.raises(SerialCommunicationError) as exc_info:
-            executor.execute_command("test", context="test exec closed")
+            executor.execute_command(
+                "test", context="test exec closed",
+                timeout_ms=1000, stop_condition=None,
+            )
         assert "not open" in str(exc_info.value).lower()
         _report("PASS", "execute_command() refused on closed port")
 
@@ -556,7 +559,10 @@ class TestCommandExecutorClosedPort:
         with SerialConnectionManager(serial_pair.slave_path) as mgr:
             executor = SerialCommandExecutor(mgr)
             with pytest.raises(SerialCommunicationError) as exc_info:
-                executor.execute_command("test", context="test bad timeout", timeout_ms=-1)
+                executor.execute_command(
+                    "test", context="test bad timeout",
+                    timeout_ms=-1, stop_condition=None,
+                )
             assert "timeout" in str(exc_info.value).lower()
         _report("PASS", "Negative timeout rejected")
 
@@ -592,6 +598,7 @@ class TestCommandExecutorVirtual:
                 "silent_command",
                 context="test silent line",
                 timeout_ms=500,
+                stop_condition=None,
                 prompt_settle_ms=50,
             )
             _report("RESULT", "output={!r}, timed_out={}, bytes={}".format(

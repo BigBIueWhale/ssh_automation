@@ -1185,8 +1185,8 @@ class SerialCommandExecutor:
         self,
         command: str,
         context: str,
-        timeout_ms: int = SERIAL_COMMAND_TIMEOUT_MS,
-        stop_condition: Optional[Callable[[str], bool]] = None,
+        timeout_ms: int,
+        stop_condition: Optional[Callable[[str], bool]],
         on_data: Optional[Callable[[str], None]] = None,
         encoding: str = "utf-8",
         prompt_settle_ms: int = SERIAL_PROMPT_SETTLE_MS,
@@ -1216,10 +1216,11 @@ class SerialCommandExecutor:
             context: Description of the purpose, embedded into error messages.
             timeout_ms: Hard upper-bound in milliseconds.  The read will
                 always stop when this expires, regardless of the stop
-                condition.  Default: 30 000 ms (30 s).
-            stop_condition: An optional callable that receives the **full
-                accumulated decoded text so far** and returns ``True`` when
-                the command is considered complete.  Common patterns::
+                condition.  Required — no default is provided so the caller
+                must make a conscious choice.
+            stop_condition: A callable that receives the **full accumulated
+                decoded text so far** and returns ``True`` when the command
+                is considered complete.  Common patterns::
 
                     # Stop when a shell prompt reappears
                     stop_condition=lambda t: t.rstrip().endswith("# ")
@@ -1227,7 +1228,7 @@ class SerialCommandExecutor:
                     # Stop when a specific string appears anywhere
                     stop_condition=lambda t: "DONE" in t
 
-                If ``None``, the read runs for the full ``timeout_ms``.
+                Pass ``None`` explicitly to read for the full ``timeout_ms``.
             on_data: An optional streaming callback invoked with each **new
                 decoded chunk** as it arrives.  Useful for real-time
                 display::
