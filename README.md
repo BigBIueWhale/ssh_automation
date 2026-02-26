@@ -573,6 +573,114 @@ for port in ports:
 
 ---
 
+### 10. Troubleshooting unreliable serial at 115200 baud
+
+If you're losing lines or seeing garbled data at 115200 — especially on
+Windows — try these settings in order.  Each example is independent; combine
+flags as needed.
+
+**Start here — enlarge the OS receive buffer and poll faster:**
+
+```python
+with SerialConnectionManager(
+    "COM3",
+    baud_rate=115200,
+    rx_buffer_size=65536,    # Windows default is often only 4 KB
+    poll_interval_s=0.002,   # drain buffer every 2 ms instead of 10 ms
+) as serial_mgr:
+    reader = SerialReader(serial_mgr)
+    text, nbytes, elapsed = reader.read_for_duration(
+        context="capture response", duration_ms=3000,
+    )
+```
+
+This doesn't alter the electrical behaviour of the link — it just gives
+the OS more room to absorb bursts and makes Python drain that room faster.
+Try this first.
+
+**If you have a full cable (TX, RX, RTS, CTS, GND) — enable hardware flow
+control:**
+
+```python
+with SerialConnectionManager(
+    "COM3",
+    baud_rate=115200,
+    rtscts=True,             # hardware RTS/CTS flow control
+    rx_buffer_size=65536,
+    poll_interval_s=0.002,
+) as serial_mgr:
+    ...
+```
+
+RTS/CTS lets the receiver tell the sender "stop, my buffer is full".  This
+is the most reliable option when wiring supports it.  **Warning:** if your
+cable only has three wires (TX, RX, GND), enabling `rtscts=True` will hang
+on write — pyserial waits for CTS to assert and it never does.  If writes
+block forever, this is why.  Disable it and try something else.
+
+**If you only have three wires (TX, RX, GND) — try software flow control:**
+
+```python
+with SerialConnectionManager(
+    "COM3",
+    baud_rate=115200,
+    xonxoff=True,            # software XON/XOFF flow control
+    rx_buffer_size=65536,
+    poll_interval_s=0.002,
+) as serial_mgr:
+    ...
+```
+
+XON/XOFF works over a 3-pin cable because it sends control characters
+in-band (no extra wires).  The catch: your target firmware must also support
+it.  If the target ignores XON/XOFF, this has no effect.  If your data
+stream contains raw bytes 0x11 or 0x13, enabling this will corrupt data
+because those are the XON/XOFF characters.
+
+**If you're seeing garbled data (not just lost lines) — try 2 stop bits:**
+
+```python
+with SerialConnectionManager(
+    "COM3",
+    baud_rate=115200,
+    stopbits=2,              # extra bit time between frames
+    rx_buffer_size=65536,
+    poll_interval_s=0.002,
+) as serial_mgr:
+    ...
+```
+
+Two stop bits add timing margin between frames.  This helps when the
+transmitter's clock is slightly off (common with cheap oscillators on
+embedded boards).  The target does not need to match — a receiver configured
+for 2 stop bits will happily receive from a sender using 1.
+
+**Keep the serial port open across multiple reads:**
+
+Opening and closing the port between reads can cause data loss — the OS
+drops any buffered bytes on close, and the re-open may toggle DTR/RTS which
+can reset or confuse some targets.  If your workflow involves multiple SSH
+triggers with serial captures, keep the connection open for the whole
+session:
+
+```python
+with SerialConnectionManager("COM3", rx_buffer_size=65536) as serial_mgr:
+    reader = SerialReader(serial_mgr)
+
+    for cmd in ["test1", "test2", "test3"]:
+        reader.flush(context=f"clear before {cmd}")
+        ssh_executor.execute_command(cmd, context=f"run {cmd}")
+        text, nbytes, elapsed = reader.read_for_duration(
+            context=f"capture {cmd}", duration_ms=3000,
+        )
+        print(text)
+```
+
+This is especially important with `rtscts=True` — some targets only
+negotiate flow control on the initial connection.
+
+---
+
 ## CLI
 
 The package also installs a `linux-ssh` command-line tool:
@@ -600,6 +708,12 @@ linux-ssh serial-exec "ls /" --stop-on "# " --stream --timeout 10000
 linux-ssh serial-read --serial-port /dev/ttyUSB0 --baud-rate 9600 --parity E
 linux-ssh serial-exec "AT" --serial-port COM3 --bytesize 7 --stopbits 2
 linux-ssh serial-exec "AT" --serial-port COM3 --write-timeout 5
+
+# Serial reliability tuning (see section 10)
+linux-ssh serial-read --serial-port COM3 --rx-buffer-size 65536 --poll-interval 0.002
+linux-ssh serial-exec "ls /" --serial-port COM3 --rtscts --rx-buffer-size 65536
+linux-ssh serial-exec "ls /" --serial-port COM3 --xonxoff
+linux-ssh serial-exec "ls /" --serial-port COM3 --stopbits 2
 
 # List serial ports
 linux-ssh serial-list

@@ -65,7 +65,7 @@ from linux_ssh_tools.serial_comm import (
     SerialReader,
     SerialCommandExecutor,
     SerialCommandResult,
-    _POLL_INTERVAL_S,
+    _POLL_INTERVAL_S_DEFAULT,
     _poll_read_loop,
     _write_all,
 )
@@ -1215,17 +1215,17 @@ class TestNullHandler:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  TESTS — _POLL_INTERVAL_S constant
+#  TESTS — _POLL_INTERVAL_S_DEFAULT constant
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestPollInterval:
-    """The _POLL_INTERVAL_S constant is sane."""
+    """The _POLL_INTERVAL_S_DEFAULT constant is sane."""
 
     def test_poll_interval_value(self):
         # type: () -> None
-        _report("TEST", "_POLL_INTERVAL_S is 10ms")
-        assert _POLL_INTERVAL_S == 0.01
-        _report("PASS", "_POLL_INTERVAL_S == 0.01")
+        _report("TEST", "_POLL_INTERVAL_S_DEFAULT is 10ms")
+        assert _POLL_INTERVAL_S_DEFAULT == 0.01
+        _report("PASS", "_POLL_INTERVAL_S_DEFAULT == 0.01")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

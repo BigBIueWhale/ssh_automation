@@ -59,6 +59,30 @@ def _add_serial_port_args(parser: argparse.ArgumentParser) -> None:
         "--write-timeout", type=float, default=10.0,
         help="Write timeout in seconds (default: 10). Use 0 for non-blocking.",
     )
+    parser.add_argument(
+        "--rtscts", action="store_true", default=False,
+        help="Enable hardware RTS/CTS flow control. Requires a cable with "
+             "RTS/CTS lines (not a 3-pin TX/RX/GND cable).",
+    )
+    parser.add_argument(
+        "--xonxoff", action="store_true", default=False,
+        help="Enable software XON/XOFF flow control. Works over 3-pin cables "
+             "but the target firmware must also support it.",
+    )
+    parser.add_argument(
+        "--dsrdtr", action="store_true", default=False,
+        help="Enable hardware DSR/DTR flow control.",
+    )
+    parser.add_argument(
+        "--rx-buffer-size", type=int, default=0,
+        help="OS receive buffer size in bytes (default: 0 = driver default). "
+             "Try 65536 or 131072 on Windows to prevent data loss at high baud rates.",
+    )
+    parser.add_argument(
+        "--poll-interval", type=float, default=0.01,
+        help="Poll loop sleep interval in seconds (default: 0.01 = 10 ms). "
+             "Lower values (e.g. 0.002) drain the OS buffer more aggressively.",
+    )
 
 
 def _create_serial_manager(args, port: str) -> SerialConnectionManager:
@@ -71,6 +95,11 @@ def _create_serial_manager(args, port: str) -> SerialConnectionManager:
         parity=args.parity,
         stopbits=args.stopbits,
         write_timeout=write_timeout,
+        rtscts=args.rtscts,
+        xonxoff=args.xonxoff,
+        dsrdtr=args.dsrdtr,
+        rx_buffer_size=args.rx_buffer_size,
+        poll_interval_s=args.poll_interval,
     )
 
 

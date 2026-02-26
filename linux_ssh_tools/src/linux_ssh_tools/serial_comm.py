@@ -38,6 +38,8 @@ from . import (
     SERIAL_DEFAULT_DURATION_MS,
     SERIAL_COMMAND_TIMEOUT_MS,
     SERIAL_PROMPT_SETTLE_MS,
+    SERIAL_POLL_INTERVAL_S,
+    SERIAL_RX_BUFFER_SIZE,
 )
 from .exceptions import SerialCommunicationError, SerialTimeoutError
 
@@ -45,10 +47,11 @@ logger = logging.getLogger("linux_ssh_tools.serial_comm")
 
 _IS_WINDOWS = platform.system() == "Windows"
 
-# Poll loop sleep granularity (10 ms).  All poll loops use this instead of
-# the serial port's read_timeout so timing is managed by our code, not the
-# driver.  Keeps CPU usage low while remaining responsive.
-_POLL_INTERVAL_S = 0.01
+# Default poll loop sleep granularity (10 ms).  All poll loops use this
+# instead of the serial port's read_timeout so timing is managed by our
+# code, not the driver.  Kept as a module-level fallback; callers should
+# prefer the per-connection ``poll_interval_s`` parameter.
+_POLL_INTERVAL_S_DEFAULT = SERIAL_POLL_INTERVAL_S
 
 # Map string parity values to pyserial constants
 _PARITY_MAP = {
@@ -98,6 +101,7 @@ def _poll_read_loop(
     on_data: Optional[Callable[[str], None]] = None,
     encoding: str = "utf-8",
     context: str = "",
+    poll_interval_s: float = _POLL_INTERVAL_S_DEFAULT,
 ) -> _ReadLoopResult:
     """Core poll loop shared by ``read_for_duration``, ``read_until``,
     and ``execute_command``.
@@ -131,7 +135,7 @@ def _poll_read_loop(
             chunk_bytes = ser.read(waiting)
             if len(chunk_bytes) == 0:
                 # in_waiting lied — sleep to prevent busy-loop
-                sleep_time = min(_POLL_INTERVAL_S, remaining)
+                sleep_time = min(poll_interval_s, remaining)
                 if sleep_time > 0:
                     time.sleep(sleep_time)
                 read_cycles += 1
@@ -182,7 +186,7 @@ def _poll_read_loop(
                         type(sc_exc).__name__, sc_exc,
                     )
         else:
-            sleep_time = min(_POLL_INTERVAL_S, remaining)
+            sleep_time = min(poll_interval_s, remaining)
             if sleep_time > 0:
                 time.sleep(sleep_time)
             read_cycles += 1
@@ -285,6 +289,8 @@ class SerialConnectionManager:
         xonxoff: bool = False,
         rtscts: bool = False,
         dsrdtr: bool = False,
+        rx_buffer_size: int = SERIAL_RX_BUFFER_SIZE,
+        poll_interval_s: float = SERIAL_POLL_INTERVAL_S,
     ) -> None:
         """Initialize serial connection manager.
 
@@ -304,6 +310,13 @@ class SerialConnectionManager:
             xonxoff: Enable software flow control (XON/XOFF).  Default: ``False``.
             rtscts: Enable hardware (RTS/CTS) flow control.  Default: ``False``.
             dsrdtr: Enable hardware (DSR/DTR) flow control.  Default: ``False``.
+            rx_buffer_size: OS receive buffer size in bytes.  ``0`` (default) leaves
+                           the driver default untouched.  On Windows the default is
+                           often only 4 KB — setting this to 65536 or higher helps
+                           prevent data loss at high baud rates.
+            poll_interval_s: Poll loop sleep granularity in seconds.  Default: 0.01
+                            (10 ms).  Lower values (e.g. 0.002) drain the OS buffer
+                            more aggressively at the cost of slightly higher CPU usage.
 
         Raises:
             SerialCommunicationError: If any parameter value is invalid.
@@ -315,6 +328,8 @@ class SerialConnectionManager:
         self.xonxoff = xonxoff
         self.rtscts = rtscts
         self.dsrdtr = dsrdtr
+        self.rx_buffer_size = rx_buffer_size
+        self.poll_interval_s = poll_interval_s
         self._serial: Optional[serial.Serial] = None
 
         # ---- Validate and resolve bytesize ----
@@ -363,10 +378,23 @@ class SerialConnectionManager:
                 f"Must be None (blocking), 0 (non-blocking), or a positive number."
             )
 
+        flow = []
+        if xonxoff:
+            flow.append("XON/XOFF")
+        if rtscts:
+            flow.append("RTS/CTS")
+        if dsrdtr:
+            flow.append("DSR/DTR")
+        flow_str = "+".join(flow) if flow else "none"
+
         logger.info(
-            "[SERIAL-INIT] Configured %s — %d %d%s%s (read_timeout=%.2fs, write_timeout=%s)",
+            "[SERIAL-INIT] Configured %s — %d %d%s%s (read_timeout=%.2fs, "
+            "write_timeout=%s, flow=%s, rx_buf=%s, poll=%.3fs)",
             port, baud_rate, bytesize, parity, stopbits, read_timeout,
             f"{write_timeout:.2f}s" if write_timeout is not None else "None (blocking)",
+            flow_str,
+            f"{rx_buffer_size}" if rx_buffer_size > 0 else "default",
+            poll_interval_s,
         )
 
     def open(self, context: str) -> None:
@@ -401,6 +429,15 @@ class SerialConnectionManager:
                 rtscts=self.rtscts,
                 dsrdtr=self.dsrdtr,
             )
+            if self.rx_buffer_size > 0:
+                self._serial.set_buffer_size(
+                    rx_size=self.rx_buffer_size,
+                    tx_size=self.rx_buffer_size,
+                )
+                logger.info(
+                    "[SERIAL-OPEN] [%s] Set OS buffer size to %d bytes on %s",
+                    context, self.rx_buffer_size, self.port,
+                )
             logger.info("[SERIAL-OPEN] [%s] Successfully opened %s", context, self.port)
 
         except serial.SerialException as exc:
@@ -659,6 +696,7 @@ class SerialReader:
                 on_data=None,
                 encoding=encoding,
                 context=context,
+                poll_interval_s=self.connection_manager.poll_interval_s,
             )
         except serial.SerialException as exc:
             msg = (
@@ -919,6 +957,7 @@ class SerialReader:
                 on_data=on_data,
                 encoding=encoding,
                 context=context,
+                poll_interval_s=self.connection_manager.poll_interval_s,
             )
         except serial.SerialException as exc:
             msg = (
@@ -1311,6 +1350,7 @@ class SerialCommandExecutor:
                 on_data=on_data,
                 encoding=encoding,
                 context=context,
+                poll_interval_s=self.connection_manager.poll_interval_s,
             )
         except serial.SerialException as exc:
             elapsed = time.monotonic()
