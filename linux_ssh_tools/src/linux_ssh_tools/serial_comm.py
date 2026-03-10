@@ -468,23 +468,32 @@ class SerialConnectionManager:
                         "[SERIAL-OPEN] [%s] Set OS buffer size to %d bytes on %s",
                         context, effective_rx_buf, self.port,
                     )
-                except (OSError, serial.SerialException) as buf_exc:
+                except (AttributeError, OSError, serial.SerialException) as buf_exc:
+                    # AttributeError: pyserial on Linux (POSIX) does not
+                    # define set_buffer_size() — only the Windows backend has
+                    # it (calls SetupComm).  Silently skip on Linux.
                     logger.debug(
                         "[SERIAL-OPEN] [%s] Could not set buffer size on %s "
-                        "(device may not support it): %s",
+                        "(not supported on this platform/device): %s",
                         context, self.port, buf_exc,
                     )
 
             # -- Explicit RTS/DTR assertion --
-            # When hardware flow control is disabled, explicitly assert RTS
-            # and DTR to ensure the remote device sees these handshake lines
-            # high.  Many devices (especially with UART hardware flow control
-            # enabled in firmware) check CTS before transmitting.  With a null
-            # modem cable, the PC's RTS drives the device's CTS — so asserting
-            # RTS here prevents the device from stalling mid-message.
+            # PySerial already requests RTS high during port configuration:
+            #   Windows: sets fRtsControl=RTS_CONTROL_ENABLE in the DCB
+            #            (via SetCommState), but does NOT call
+            #            EscapeCommFunction(SETRTS).
+            #   Linux:   calls TIOCMBIS with TIOCM_RTS during open().
             #
-            # With USB-to-serial adapters (e.g. MOXA Uport), the initial pin
-            # state after open() may be indeterminate; this makes it explicit.
+            # Our explicit ser.rts=True adds a direct EscapeCommFunction
+            # (SETRTS) call on Windows — belt-and-suspenders reinforcement
+            # beyond the DCB setting.  On Linux it is harmlessly redundant.
+            #
+            # Why this matters: with a null modem cable, the PC's RTS drives
+            # the device's CTS.  If the device implements hardware flow
+            # control in firmware, it checks CTS before transmitting.
+            # Keeping RTS asserted prevents the device from stalling
+            # mid-message.
             try:
                 if not self.rtscts:
                     self._serial.rts = True
