@@ -576,16 +576,42 @@ for port in ports:
 ### 10. Troubleshooting unreliable serial at 115200 baud
 
 If you're losing lines or seeing garbled data at 115200 — especially on
-Windows — try these settings in order.  Each example is independent; combine
-flags as needed.
+Windows — work through this checklist in order.
 
-**Start here — enlarge the OS receive buffer and poll faster:**
+**First check your cabling — DTE-to-DTE needs a null modem:**
+
+If you're connecting a PC (or a USB-to-serial adapter like MOXA Uport) to
+another DTE device such as an embedded board, you need a **null modem**
+cable or adapter.  A straight-through cable between two DTE devices leaves
+the handshake lines wired incorrectly — in particular, the device's CTS
+pin is left floating (unconnected).
+
+Symptoms of this problem:
+- The last ~10 characters of each message drop nondeterministically
+- The issue appears with one device but not another (the one that checks
+  CTS before transmitting vs. one that doesn't)
+- TeraTerm may appear more reliable (it configures the serial driver
+  differently)
+
+A null modem cable crosses TX→RX and RTS→CTS between the two ends, so
+the PC's asserted RTS reaches the device's CTS and the device transmits
+without stalling.  This is the definitive fix for DTE-to-DTE connections.
+
+The library auto-asserts RTS and DTR on port open (via
+`EscapeCommFunction(SETRTS)` on Windows) to help, but this only works if
+the cable actually routes RTS to the device's CTS — i.e. a null modem.
+
+**Enlarge the OS receive buffer and poll faster:**
+
+On Windows, the library auto-applies a 128 KB receive buffer when
+`rx_buffer_size` is left at the default (0).  You can override this or
+combine it with a faster poll interval:
 
 ```python
 with SerialConnectionManager(
     "COM3",
     baud_rate=115200,
-    rx_buffer_size=65536,    # Windows default is often only 4 KB
+    rx_buffer_size=65536,    # explicit override (Windows auto-applies 128 KB by default)
     poll_interval_s=0.002,   # drain buffer every 2 ms instead of 10 ms
 ) as serial_mgr:
     reader = SerialReader(serial_mgr)
@@ -596,7 +622,6 @@ with SerialConnectionManager(
 
 This doesn't alter the electrical behaviour of the link — it just gives
 the OS more room to absorb bursts and makes Python drain that room faster.
-Try this first.
 
 **If you have a full cable (TX, RX, RTS, CTS, GND) — enable hardware flow
 control:**

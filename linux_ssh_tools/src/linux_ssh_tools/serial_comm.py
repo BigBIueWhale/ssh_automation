@@ -40,6 +40,7 @@ from . import (
     SERIAL_PROMPT_SETTLE_MS,
     SERIAL_POLL_INTERVAL_S,
     SERIAL_RX_BUFFER_SIZE,
+    SERIAL_WIN_RX_BUFFER_SIZE,
 )
 from .exceptions import SerialCommunicationError, SerialTimeoutError
 
@@ -397,6 +398,18 @@ class SerialConnectionManager:
             poll_interval_s,
         )
 
+        if _IS_WINDOWS and not rtscts and not dsrdtr:
+            logger.info(
+                "[SERIAL-INIT] Tip: if you experience dropped characters on "
+                "Windows with a USB-to-serial adapter, check your cabling. "
+                "Connecting two DTE devices requires a null modem cable (or "
+                "adapter) so that the PC's RTS reaches the device's CTS. "
+                "Without it, the device's CTS pin floats and it may "
+                "nondeterministically pause transmission. "
+                "Alternatively, enable rtscts=True if the device supports "
+                "hardware flow control."
+            )
+
     def open(self, context: str) -> None:
         """Open the serial port.
 
@@ -429,15 +442,78 @@ class SerialConnectionManager:
                 rtscts=self.rtscts,
                 dsrdtr=self.dsrdtr,
             )
-            if self.rx_buffer_size > 0:
-                self._serial.set_buffer_size(
-                    rx_size=self.rx_buffer_size,
-                    tx_size=self.rx_buffer_size,
-                )
+
+            # -- RX buffer sizing --
+            effective_rx_buf = self.rx_buffer_size
+            if effective_rx_buf == 0 and _IS_WINDOWS:
+                # Windows serial drivers (including MOXA Uport) often default
+                # to a 4 KB receive buffer.  At high baud rates with USB-to-
+                # serial adapters, USB transfer latency can cause the small
+                # buffer to overflow before the application drains it.
+                # Auto-apply a 128 KB buffer to avoid silent data loss.
+                effective_rx_buf = SERIAL_WIN_RX_BUFFER_SIZE
                 logger.info(
-                    "[SERIAL-OPEN] [%s] Set OS buffer size to %d bytes on %s",
-                    context, self.rx_buffer_size, self.port,
+                    "[SERIAL-OPEN] [%s] Windows detected — auto-setting "
+                    "RX buffer to %d bytes on %s (override with "
+                    "rx_buffer_size parameter)",
+                    context, effective_rx_buf, self.port,
                 )
+            if effective_rx_buf > 0:
+                try:
+                    self._serial.set_buffer_size(
+                        rx_size=effective_rx_buf,
+                        tx_size=effective_rx_buf,
+                    )
+                    logger.info(
+                        "[SERIAL-OPEN] [%s] Set OS buffer size to %d bytes on %s",
+                        context, effective_rx_buf, self.port,
+                    )
+                except (AttributeError, OSError, serial.SerialException) as buf_exc:
+                    # AttributeError: pyserial on Linux (POSIX) does not
+                    # define set_buffer_size() — only the Windows backend has
+                    # it (calls SetupComm).  Silently skip on Linux.
+                    logger.debug(
+                        "[SERIAL-OPEN] [%s] Could not set buffer size on %s "
+                        "(not supported on this platform/device): %s",
+                        context, self.port, buf_exc,
+                    )
+
+            # -- Explicit RTS/DTR assertion --
+            # PySerial already requests RTS high during port configuration:
+            #   Windows: sets fRtsControl=RTS_CONTROL_ENABLE in the DCB
+            #            (via SetCommState), but does NOT call
+            #            EscapeCommFunction(SETRTS).
+            #   Linux:   calls TIOCMBIS with TIOCM_RTS during open().
+            #
+            # Our explicit ser.rts=True adds a direct EscapeCommFunction
+            # (SETRTS) call on Windows — belt-and-suspenders reinforcement
+            # beyond the DCB setting.  On Linux it is harmlessly redundant.
+            #
+            # Why this matters: with a null modem cable, the PC's RTS drives
+            # the device's CTS.  If the device implements hardware flow
+            # control in firmware, it checks CTS before transmitting.
+            # Keeping RTS asserted prevents the device from stalling
+            # mid-message.
+            try:
+                if not self.rtscts:
+                    self._serial.rts = True
+                    logger.debug(
+                        "[SERIAL-OPEN] [%s] Explicitly asserted RTS on %s",
+                        context, self.port,
+                    )
+                if not self.dsrdtr:
+                    self._serial.dtr = True
+                    logger.debug(
+                        "[SERIAL-OPEN] [%s] Explicitly asserted DTR on %s",
+                        context, self.port,
+                    )
+            except (OSError, serial.SerialException) as pin_exc:
+                logger.debug(
+                    "[SERIAL-OPEN] [%s] Could not assert RTS/DTR on %s "
+                    "(device may not support pin control): %s",
+                    context, self.port, pin_exc,
+                )
+
             logger.info("[SERIAL-OPEN] [%s] Successfully opened %s", context, self.port)
 
         except serial.SerialException as exc:

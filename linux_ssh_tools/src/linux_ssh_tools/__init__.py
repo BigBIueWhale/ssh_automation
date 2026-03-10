@@ -62,6 +62,7 @@ SERIAL_COMMAND_TIMEOUT_MS = 30000  # default serial command execution timeout
 SERIAL_PROMPT_SETTLE_MS = 200     # pause after wake-up ENTER before sending command
 SERIAL_POLL_INTERVAL_S = 0.01     # poll loop sleep granularity in seconds (10 ms)
 SERIAL_RX_BUFFER_SIZE = 0         # OS receive buffer size in bytes; 0 = driver default
+SERIAL_WIN_RX_BUFFER_SIZE = 131072  # Windows auto-applied RX buffer (128 KB) when rx_buffer_size=0
 
 # Default serial device paths per machine.
 # On Windows these are COM ports (COM3, COM4, …).
